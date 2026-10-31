@@ -1,0 +1,29 @@
+[package]
+name = "base64-codec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+base64-codec = { path = "..", features = ["std"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent package so `cargo fuzz` builds this crate standalone.
+[workspace]

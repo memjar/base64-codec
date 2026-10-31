@@ -1,0 +1,34 @@
+[package]
+name = "base64-codec"
+description = "Base64 encoder and decoder with SIMD, no_std and dependency-free"
+version = "0.0.1"
+authors = ["Clément DOUIN (soywod) <pimalaya.org@posteo.net>"]
+rust-version = "1.89"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+categories = ["encoding", "no-std", "no-std::no-alloc", "email"]
+keywords = ["base64", "simd", "mime", "codec", "no-std"]
+homepage = "https://pimalaya.org"
+documentation = "https://docs.rs/base64-codec/latest/base64_codec"
+repository = "https://github.com/pimalaya/base64-codec"
+exclude = ["/cairn", "/fuzz"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+alloc = []
+std = ["alloc"]
+
+[[bench]]
+name = "compare"
+path = "benches/compare.rs"
+harness = false
+required-features = ["std"]
+
+[dev-dependencies]
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+base64-simd = "0.8"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+encodify = "1"
