@@ -95,7 +95,7 @@ impl Base64Decode {
     fn run(&mut self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
         let loops = self.cpu.loops();
         let state = &mut self.state;
-        let (end, padded) = scalar::trimmed(src);
+        let end = scalar::trimmed(src);
         let mut read = 0;
         let mut written = 0;
 
@@ -123,7 +123,9 @@ impl Base64Decode {
                 read += chars;
                 written += chars / 4 * 3;
 
-                if end - read < 4 && scalar::decode_tail(state, &src[read..end], padded) {
+                if end - read < 4
+                    && scalar::decode_tail(state, &src[read..end], src[end..].contains(&b'='))
+                {
                     state.line_start = match src[read..].last() {
                         Some(last) => *last == b'\n',
                         None => state.line_start && chars == 0,
@@ -201,27 +203,32 @@ pub const fn decoded_len_max(len: usize) -> usize {
 /// whole quanta then at most three symbols before padding and blanks, in one
 /// run, anything else with the decoder's loop from where the run stopped.
 fn decode_all(src: &[u8], dst: &mut [MaybeUninit<u8>], cpu: Base64Cpu) -> Base64DecodeOutput {
-    let mut decoder = Base64Decode::new(cpu);
-    let (end, padded) = scalar::trimmed(src);
+    let end = scalar::trimmed(src);
 
     // SAFETY: the token names a backend the CPU supports.
     let chars = unsafe { (cpu.loops().decode_run)(&src[..end], dst) };
-    let mut read = chars;
     let mut written = chars / 4 * 3;
+    let mut state = DecodeState::new();
 
-    if end - chars < 4 && scalar::decode_tail(&mut decoder.state, &src[chars..end], padded) {
-        read = src.len();
-    } else {
-        let eol = decoder.state.line_break(&src[chars..], chars);
-        let (more_read, more_written) = decoder.run(&src[read + eol..], &mut dst[written..]);
-        read += eol + more_read;
-        written += more_written;
+    // NOTE: the padding is left out of the state, which ends here.
+    if end - chars < 4 && scalar::decode_tail(&mut state, &src[chars..end], false) {
+        let tail = scalar::decode_finish(&mut state, &mut dst[written..]).unwrap_or(0);
+
+        return Base64DecodeOutput {
+            read: src.len(),
+            written: written + tail,
+            clean: state.clean,
+        };
     }
 
+    let mut decoder = Base64Decode { cpu, state };
+    let eol = decoder.state.line_break(&src[chars..], chars);
+    let (read, more) = decoder.run(&src[chars + eol..], &mut dst[written..]);
+    written += more;
     let end = scalar::decode_finish(&mut decoder.state, &mut dst[written..]).unwrap_or(0);
 
     Base64DecodeOutput {
-        read,
+        read: chars + eol + read,
         written: written + end,
         clean: decoder.state.clean,
     }

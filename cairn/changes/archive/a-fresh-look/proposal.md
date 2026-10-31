@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: a-fresh-look
-status: draft
+status: landed
 created: 2026-10-31
 ---
 

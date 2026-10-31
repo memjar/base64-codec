@@ -7,24 +7,26 @@
 //! constants in registers; the decoder and the encoder reach them through the
 //! backend's [`Loops`].
 //!
-//! A backend module defines its kernels and `Bad`, the characters outside the
-//! alphabet its decode kernels met, which `join`s with others and tells
-//! whether there were `any` and how many characters came `first`:
+//! A backend module defines its two kernels and `Bad`, the characters outside
+//! the alphabet a decode kernel met, which tells whether there were `any` and
+//! how many characters came `first`, and `join`s with others unless the
+//! backend tests each block apart (`EAGER`):
 //!
-//! - The wide decode kernel may write spare bytes past its own, as many as the
-//!   invocation names; the exact one writes its own alone.
-//! - The wide encode kernel reads a window, its group starting at the lead the
-//!   invocation names, so that it can load bytes around it; the exact one
-//!   reads its group alone, for the blocks no window fits around.
+//! - The decode kernel fills its output: the bytes of its block, then as many
+//!   spare bytes as the invocation names when the output has room for them.
+//! - The encode kernel reads its input: a window of the length the invocation
+//!   names, its group starting at the lead, so that it can load bytes around
+//!   it, or the group alone, for the blocks no window fits around.
 //!
 //! A run or a line ends with a block ending at its end and overlapping the one
 //! before, which is harmless since a quantum decodes to the same bytes
-//! wherever it falls; a run shorter than one block goes to the narrower
-//! backend the invocation names.
+//! wherever it falls; a run shorter than one block goes to the narrower loop
+//! the invocation names.
 
 use core::mem::MaybeUninit;
 
-/// Wide blocks a decoding run tests at once.
+/// Wide blocks a decoding run takes per group, tested once unless the backend
+/// tests each block apart.
 pub(crate) const DECODE_UNROLL: usize = 4;
 
 /// Wide blocks an encoding run writes per step.
@@ -60,26 +62,24 @@ pub(crate) fn uninit(dst: &mut [u8]) -> &mut [MaybeUninit<u8>] {
 }
 
 /// Stamps a backend's `LOOPS` from its kernels: for decoding, the characters
-/// a block takes, the spare bytes its wide kernel writes, the wide and exact
-/// kernels and the narrower run; for encoding, the bytes a block takes, the
-/// window and lead of its wide kernel, the wide and exact kernels and the
-/// narrower run.
+/// a block takes, the spare bytes its kernel writes when it has room, the
+/// kernel and the narrower run; for encoding, the bytes a block takes, the
+/// window its kernel reads and the lead of the group in it, the kernel and
+/// the narrower run.
 macro_rules! base64_driver {
     (
         $(#[$attr:meta])*
         decode(
             chars: $chars:literal,
             spare: $spare:literal,
-            wide: $decode_wide:ident,
-            exact: $decode_exact:ident,
+            kernel: $decode:ident,
             narrow: $decode_narrow:path $(,)?
         ),
         encode(
             bytes: $bytes:literal,
             window: $window:literal,
             lead: $lead:literal,
-            wide: $encode_wide:ident,
-            exact: $encode_exact:ident,
+            kernel: $encode:ident,
             narrow: $encode_narrow:path $(,)?
         ) $(,)?
     ) => {
@@ -93,10 +93,10 @@ macro_rules! base64_driver {
 
         /// Decodes the whole quanta of alphabet characters at the start of
         /// `src` that fit in `dst`, returning the characters read: in blocks,
-        /// or by the narrower backend below one block.
+        /// or by the narrower loop below one block.
         ///
         /// NOTE: the blocks are a function of their own, so that a short run
-        /// reaches the narrower backend before any register is saved.
+        /// reaches the narrower loop before any register is saved.
         $(#[$attr])*
         pub(crate) fn decode_run(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             let chars = (src.len() / 4).min(dst.len() / 3) * 4;
@@ -110,9 +110,9 @@ macro_rules! base64_driver {
 
         /// Decodes `src`, whole quanta at least one block long, up to its
         /// first character outside the alphabet, returning the characters
-        /// read: groups of wide blocks tested once while their spare bytes
-        /// fall within the run's output, then exact blocks, the last one
-        /// ending at the run's end.
+        /// read: groups of blocks writing spare bytes while those fall within
+        /// the run's output, then blocks writing their own alone, the last
+        /// one ending at the run's end.
         $(#[$attr])*
         #[inline(never)]
         fn decode_blocks(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
@@ -127,7 +127,7 @@ macro_rules! base64_driver {
             let groups = chars.saturating_sub(2 * $spare) / (UNROLL * WIDE);
             let mut at = 0;
 
-            for group in 0..groups {
+            'groups: for group in 0..groups {
                 let (Some(group), Some(out)) = (
                     src[group * UNROLL * WIDE..].first_chunk::<{ UNROLL * WIDE }>(),
                     dst[group * UNROLL * BYTES..].first_chunk_mut::<{ UNROLL * BYTES + $spare }>(),
@@ -143,38 +143,39 @@ macro_rules! base64_driver {
                         return at;
                     };
 
-                    bad = bad.join($decode_wide(chars, bytes));
+                    let found = $decode(chars, bytes);
+
+                    if Bad::EAGER && found.any() {
+                        break 'groups;
+                    }
+
+                    bad = bad.join(found);
                 }
 
-                if bad.any() {
+                if !Bad::EAGER && bad.any() {
                     break;
                 }
 
                 at += UNROLL * WIDE;
             }
 
-            let (blocks, _) = src[at..chars].as_chunks::<WIDE>();
-            let (outs, _) = dst[at / 4 * 3..].as_chunks_mut::<BYTES>();
+            while at < chars {
+                let start = at.min(chars - WIDE);
 
-            for (block, bytes) in blocks.iter().zip(outs) {
-                let bad = $decode_exact(block, bytes);
+                let (Some(block), Some(bytes)) = (
+                    src[start..].first_chunk(),
+                    dst[start / 4 * 3..].first_chunk_mut::<BYTES>(),
+                ) else {
+                    return at;
+                };
 
-                if bad.any() {
-                    return at + bad.first();
-                }
-
-                at += WIDE;
-            }
-
-            if at < chars
-                && let (Some(block), Some(bytes)) =
-                    (src[..chars].last_chunk(), dst[..chars / 4 * 3].last_chunk_mut::<BYTES>())
-            {
-                let bad = $decode_exact(block, bytes);
+                let bad = $decode(block, bytes);
 
                 if bad.any() {
-                    return chars - WIDE + bad.first();
+                    return start + bad.first();
                 }
+
+                at = start + WIDE;
             }
 
             chars
@@ -198,8 +199,9 @@ macro_rules! base64_driver {
             }
         }
 
-        /// `decode_lines` with its wide blocks tested once per line, the last
-        /// one ending at the line's end.
+        /// `decode_lines` in blocks writing spare bytes, the last one ending
+        /// at the line's end, tested once per line unless the backend tests
+        /// each block apart.
         ///
         /// NOTE: `WIDTH` is the width when it is known at compile time, 0
         /// otherwise, so that the common width compiles with its blocks
@@ -242,11 +244,17 @@ macro_rules! base64_driver {
                         return done;
                     };
 
-                    bad = bad.join($decode_wide(block, bytes));
+                    let found = $decode(block, bytes);
+
+                    if Bad::EAGER && found.any() {
+                        return done;
+                    }
+
+                    bad = bad.join(found);
                     at = start + WIDE;
                 }
 
-                if bad.any() {
+                if !Bad::EAGER && bad.any() {
                     break;
                 }
 
@@ -257,8 +265,8 @@ macro_rules! base64_driver {
         }
 
         /// Encodes the whole groups at the start of `src` that fit in `dst`,
-        /// returning the bytes read: in blocks, or by the narrower backend
-        /// below one block, as `decode_run` does.
+        /// returning the bytes read: in blocks, or by the narrower loop below
+        /// one block, as `decode_run` does.
         $(#[$attr])*
         pub(crate) fn encode_run(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             let bytes = (src.len() / 3).min(dst.len() / 4) * 3;
@@ -271,9 +279,9 @@ macro_rules! base64_driver {
         }
 
         /// Encodes `src`, whole groups at least one block long, returning
-        /// the bytes read: steps of wide blocks reading their windows around
-        /// their groups, then single blocks, exact where no window fits, the
-        /// last one ending at the run's end.
+        /// the bytes read: steps of blocks reading windows around their
+        /// groups, then single blocks, reading their group alone where no
+        /// window fits, the last one ending at the run's end.
         $(#[$attr])*
         #[inline(never)]
         fn encode_blocks(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
@@ -285,11 +293,11 @@ macro_rules! base64_driver {
             let bytes = src.len();
             let dst = &mut dst[..bytes / 3 * 4];
 
-            let (Some(group), Some(chars)) = (src.first_chunk(), dst.first_chunk_mut()) else {
+            let (Some(group), Some(chars)) = (src.first_chunk::<BYTES>(), dst.first_chunk_mut()) else {
                 return 0;
             };
 
-            $encode_exact(group, chars);
+            $encode(group, chars);
             let mut at = BYTES;
             let (steps, _) = dst[CHARS..].as_chunks_mut::<{ crate::driver::ENCODE_UNROLL * CHARS }>();
 
@@ -301,11 +309,11 @@ macro_rules! base64_driver {
                 let (outs, _) = outs.as_chunks_mut::<CHARS>();
 
                 for (block, chars) in outs.iter_mut().enumerate() {
-                    let Some(window) = windows[block * BYTES..].first_chunk() else {
+                    let Some(window) = windows[block * BYTES..].first_chunk::<$window>() else {
                         return at;
                     };
 
-                    $encode_wide(window, chars);
+                    $encode(window, chars);
                 }
 
                 at += STEP;
@@ -313,11 +321,11 @@ macro_rules! base64_driver {
 
             while at < bytes {
                 let start = at.min(bytes - BYTES);
-                let window = start.checked_sub($lead).and_then(|lead| src[lead..].first_chunk());
+                let window = start.checked_sub($lead).and_then(|lead| src[lead..].first_chunk::<$window>());
 
-                match (window, src[start..].first_chunk(), dst[start / 3 * 4..].first_chunk_mut()) {
-                    (Some(window), _, Some(chars)) => $encode_wide(window, chars),
-                    (None, Some(group), Some(chars)) => $encode_exact(group, chars),
+                match (window, src[start..].first_chunk::<BYTES>(), dst[start / 3 * 4..].first_chunk_mut()) {
+                    (Some(window), _, Some(chars)) => $encode(window, chars),
+                    (None, Some(group), Some(chars)) => $encode(group, chars),
                     _ => return at,
                 }
 
@@ -342,9 +350,8 @@ macro_rules! base64_driver {
             }
         }
 
-        /// `encode_lines` in exact blocks, the last one ending at the line's
-        /// end, each line ended by CRLF when `EOL` is 2 and by LF when it is
-        /// 1.
+        /// `encode_lines` in blocks, the last one ending at the line's end,
+        /// each line ended by CRLF when `EOL` is 2 and by LF when it is 1.
         ///
         /// NOTE: the ending's length is a constant, so that it is written
         /// with plain stores and not a copy call per line.
@@ -368,13 +375,13 @@ macro_rules! base64_driver {
                     let start = at.min(LINE_BYTES - BYTES);
 
                     let (Some(group), Some(chars)) = (
-                        line[start..].first_chunk(),
+                        line[start..].first_chunk::<BYTES>(),
                         out[start / 3 * 4..].first_chunk_mut(),
                     ) else {
                         return done;
                     };
 
-                    $encode_exact(group, chars);
+                    $encode(group, chars);
                     at = start + BYTES;
                 }
 

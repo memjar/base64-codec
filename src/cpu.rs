@@ -98,34 +98,19 @@ pub enum Base64Backend {
     Neon,
 }
 
-#[cfg(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
-    target_feature = "avx512vbmi"
-))]
-const BASELINE_BACKEND: Base64Backend = Base64Backend::Avx512;
-
-#[cfg(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
-    target_feature = "avx2",
-    not(target_feature = "avx512vbmi")
-))]
-const BASELINE_BACKEND: Base64Backend = Base64Backend::Avx2;
-
-#[cfg(all(
-    any(target_arch = "x86", target_arch = "x86_64"),
-    target_feature = "ssse3",
-    not(target_feature = "avx2")
-))]
-const BASELINE_BACKEND: Base64Backend = Base64Backend::Ssse3;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+const BASELINE_BACKEND: Base64Backend = widest(
+    cfg!(target_feature = "avx512vbmi"),
+    cfg!(target_feature = "avx2"),
+    cfg!(target_feature = "ssse3"),
+);
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 const BASELINE_BACKEND: Base64Backend = Base64Backend::Neon;
 
 #[cfg(not(any(
-    all(
-        any(target_arch = "x86", target_arch = "x86_64"),
-        target_feature = "ssse3"
-    ),
+    target_arch = "x86",
+    target_arch = "x86_64",
     all(target_arch = "aarch64", target_feature = "neon")
 )))]
 const BASELINE_BACKEND: Base64Backend = Base64Backend::Scalar;
@@ -135,15 +120,11 @@ const BASELINE_BACKEND: Base64Backend = Base64Backend::Scalar;
     any(target_arch = "x86", target_arch = "x86_64")
 ))]
 fn detect_backend() -> Base64Backend {
-    if std::arch::is_x86_feature_detected!("avx512vbmi") {
-        Base64Backend::Avx512
-    } else if std::arch::is_x86_feature_detected!("avx2") {
-        Base64Backend::Avx2
-    } else if std::arch::is_x86_feature_detected!("ssse3") {
-        Base64Backend::Ssse3
-    } else {
-        BASELINE_BACKEND
-    }
+    widest(
+        std::arch::is_x86_feature_detected!("avx512vbmi"),
+        std::arch::is_x86_feature_detected!("avx2"),
+        std::arch::is_x86_feature_detected!("ssse3"),
+    )
 }
 
 #[cfg(all(
@@ -152,6 +133,17 @@ fn detect_backend() -> Base64Backend {
 ))]
 fn detect_backend() -> Base64Backend {
     BASELINE_BACKEND
+}
+
+/// The widest x86 backend of the features given: AVX-512 VBMI, AVX2, SSSE3.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+const fn widest(avx512: bool, avx2: bool, ssse3: bool) -> Base64Backend {
+    match (avx512, avx2, ssse3) {
+        (true, _, _) => Base64Backend::Avx512,
+        (_, true, _) => Base64Backend::Avx2,
+        (_, _, true) => Base64Backend::Ssse3,
+        _ => Base64Backend::Scalar,
+    }
 }
 
 /// Every token the running CPU supports, the detected one first.

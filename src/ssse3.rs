@@ -17,16 +17,14 @@ base64_driver!(
     decode(
         chars: 16,
         spare: 4,
-        wide: decode_wide,
-        exact: decode_exact,
+        kernel: decode,
         narrow: crate::scalar::decode_quanta,
     ),
     encode(
         bytes: 12,
         window: 16,
         lead: 4,
-        wide: encode_wide,
-        exact: encode_exact,
+        kernel: encode,
         narrow: crate::scalar::encode_groups,
     ),
 );
@@ -36,6 +34,9 @@ base64_driver!(
 struct Bad(__m128i);
 
 impl Bad {
+    /// Blocks are joined and tested once per group.
+    const EAGER: bool = false;
+
     #[inline]
     #[target_feature(enable = "ssse3")]
     fn none() -> Self {
@@ -51,129 +52,61 @@ impl Bad {
     #[inline]
     #[target_feature(enable = "ssse3")]
     fn any(self) -> bool {
-        self.valid() != 0xffff
+        self.first() < 16
     }
 
     /// The characters of the whole quanta before the first character
-    /// outside the alphabet.
+    /// outside the alphabet, 16 when there is none.
     #[inline]
     #[target_feature(enable = "ssse3")]
     fn first(self) -> usize {
-        self.valid().trailing_ones() as usize / 4 * 4
-    }
-
-    /// A bit per character, set when it is in the alphabet.
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    fn valid(self) -> u32 {
-        _mm_movemask_epi8(_mm_cmpeq_epi8(self.0, _mm_setzero_si128())) as u32
+        let valid = _mm_movemask_epi8(_mm_cmpeq_epi8(self.0, _mm_setzero_si128()));
+        (valid as u32).trailing_ones() as usize / 4 * 4
     }
 }
 
-/// Decodes 16 characters into the first 12 bytes of `out`, its last 4 left
-/// spare.
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn decode_wide(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; 16]) -> Bad {
-    let (bytes, bad) = decode(chars);
-
-    // SAFETY: `out` holds the 16 bytes the store writes.
-    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), bytes) };
-
-    bad
-}
-
-/// Decodes 16 characters into 12 bytes.
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn decode_exact(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; 12]) -> Bad {
-    let (bytes, bad) = decode(chars);
-    let tail = _mm_cvtsi128_si32(_mm_srli_si128::<8>(bytes));
-
-    // SAFETY: `out` holds 12 bytes, the first 8 for the first store and the
-    // last 4 for the second.
-    unsafe {
-        _mm_storel_epi64(out.as_mut_ptr().cast(), bytes);
-        out.as_mut_ptr().add(8).cast::<i32>().write_unaligned(tail);
-    }
-
-    bad
-}
-
-/// Encodes the 12 bytes of `window` from its fifth into 16 characters, its
-/// first 4 bytes only loaded along.
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn encode_wide(window: &[u8; 16], out: &mut [MaybeUninit<u8>; 16]) {
-    // SAFETY: `window` holds the 16 bytes the load reads.
-    let bytes = unsafe { _mm_loadu_si128(window.as_ptr().cast()) };
-    let spread = _mm_shuffle_epi8(
-        bytes,
-        _mm_setr_epi8(5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14),
-    );
-
-    // SAFETY: `out` holds the 16 bytes the store writes.
-    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(split(spread))) };
-}
-
-/// Encodes 12 bytes into 16 characters, reading no byte around them.
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn encode_exact(bytes: &[u8; 12], out: &mut [MaybeUninit<u8>; 16]) {
-    let [low @ .., h0, h1, h2, h3] = *bytes;
-    let high = i64::from(u32::from_le_bytes([h0, h1, h2, h3]));
-    let bytes = _mm_set_epi64x(high, i64::from_le_bytes(low));
-
-    let spread = _mm_shuffle_epi8(
-        bytes,
-        _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10),
-    );
-
-    // SAFETY: `out` holds the 16 bytes the store writes.
-    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(split(spread))) };
-}
-
-/// The 12 bytes of 16 characters, first in the vector, and a non-zero byte
-/// for each character outside the alphabet.
+/// Decodes 16 characters into the first 12 bytes of `out`, and its 4 spare
+/// bytes when it holds 16.
 ///
-/// Its high nibble picks a class of characters and its low nibble a bit in
-/// that class, set when the pair is outside the alphabet; the high nibble,
-/// with `/` set apart, also picks the offset to the sextet. The four sextets
-/// of each 32-bit lane are then packed into three bytes.
+/// The high nibble of a character picks its class, and its low nibble the
+/// classes it allows, looked up with the character as it is: one from 128 up
+/// looks up zero, which allows nothing. The high nibble also picks the offset
+/// to the sextet, `/` landing past 63, where the sextets are clamped. The
+/// four sextets of each 32-bit lane are then packed into three bytes.
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn decode(chars: &[u8; 16]) -> (__m128i, Bad) {
+fn decode<const N: usize>(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; N]) -> Bad {
+    const { assert!(N == 12 || N == 16) };
+
     // SAFETY: `chars` holds the 16 bytes the load reads.
     let chars = unsafe { _mm_loadu_si128(chars.as_ptr().cast()) };
-    let nibble = _mm_set1_epi8(0x0f);
-    let low = _mm_and_si128(chars, nibble);
-    let high = _mm_and_si128(_mm_srli_epi32::<4>(chars), nibble);
+    let high = _mm_and_si128(_mm_srli_epi32::<4>(chars), _mm_set1_epi8(0x0f));
 
-    let bad = _mm_and_si128(
-        _mm_shuffle_epi8(
+    let allowed = _mm_shuffle_epi8(
+        _mm_andnot_si128(
             _mm_setr_epi8(
                 0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, 0x1a, 0x1b, 0x1b,
                 0x1b, 0x1a,
             ),
-            low,
+            _mm_set1_epi8(-1),
         ),
-        _mm_shuffle_epi8(
-            _mm_setr_epi8(
-                0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
-                0x10, 0x10,
-            ),
-            high,
-        ),
+        chars,
     );
 
-    let slash = _mm_cmpeq_epi8(chars, _mm_set1_epi8(b'/' as i8));
+    let class = _mm_shuffle_epi8(
+        _mm_setr_epi8(
+            0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+            0x10, 0x10,
+        ),
+        high,
+    );
 
     let offsets = _mm_shuffle_epi8(
-        _mm_setr_epi8(0, 16, 19, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0),
-        _mm_add_epi8(slash, high),
+        _mm_setr_epi8(0, 0, 19, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0),
+        high,
     );
 
-    let sextets = _mm_add_epi8(chars, offsets);
+    let sextets = _mm_min_epu8(_mm_add_epi8(chars, offsets), _mm_set1_epi8(63));
     let pairs = _mm_maddubs_epi16(sextets, _mm_set1_epi32(0x0140_0140));
     let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0001_1000));
 
@@ -182,7 +115,55 @@ fn decode(chars: &[u8; 16]) -> (__m128i, Bad) {
         _mm_setr_epi8(2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1),
     );
 
-    (bytes, Bad(bad))
+    if N < 16 {
+        let tail = _mm_cvtsi128_si32(_mm_srli_si128::<8>(bytes));
+
+        // SAFETY: `out` holds 12 bytes, the first 8 for the first store and
+        // the last 4 for the second.
+        unsafe {
+            _mm_storel_epi64(out.as_mut_ptr().cast(), bytes);
+            out.as_mut_ptr().add(8).cast::<i32>().write_unaligned(tail);
+        }
+    } else {
+        // SAFETY: `out` holds the 16 bytes the store writes.
+        unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), bytes) };
+    }
+
+    Bad(_mm_andnot_si128(allowed, class))
+}
+
+/// Encodes 12 bytes into 16 characters: from a window of 16, its group from
+/// its fifth byte, in one load, or from the group alone, in two.
+#[inline]
+#[target_feature(enable = "ssse3")]
+fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 16]) {
+    const { assert!(W == 12 || W == 16) };
+
+    let spread = if W == 16 {
+        // SAFETY: `window` holds the 16 bytes the load reads.
+        let bytes = unsafe { _mm_loadu_si128(window.as_ptr().cast()) };
+        _mm_shuffle_epi8(
+            bytes,
+            _mm_setr_epi8(5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14),
+        )
+    } else {
+        // SAFETY: `window` holds 12 bytes, the loads read the first 8 and the
+        // last 4.
+        let (low, high) = unsafe {
+            (
+                window.as_ptr().cast::<i64>().read_unaligned(),
+                window.as_ptr().add(8).cast::<u32>().read_unaligned(),
+            )
+        };
+
+        _mm_shuffle_epi8(
+            _mm_set_epi64x(i64::from(high), low),
+            _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10),
+        )
+    };
+
+    // SAFETY: `out` holds the 16 bytes the store writes.
+    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(split(spread))) };
 }
 
 /// The four sextets of each 32-bit lane, from the three bytes spread over
@@ -263,18 +244,20 @@ mod tests {
         }
 
         // SAFETY: SSSE3 was detected above.
-        check_decode_kernel(|chars, out| unsafe { run(decode_exact(chars, out)) });
+        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 12]| unsafe {
+            run(decode(chars, out))
+        });
         // SAFETY: SSSE3 was detected above.
         check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 12]| unsafe {
             let mut wide = [MaybeUninit::new(0); 16];
-            let read = run(decode_wide(chars, &mut wide));
+            let read = run(decode(chars, &mut wide));
             out.copy_from_slice(&wide[..12]);
             read
         });
         // SAFETY: SSSE3 was detected above.
-        check_encode_kernel(4, |window, out| unsafe { encode_wide(window, out) });
+        check_encode_kernel(4, |window: &[u8; 16], out| unsafe { encode(window, out) });
         // SAFETY: SSSE3 was detected above.
-        check_encode_kernel(0, |bytes, out| unsafe { encode_exact(bytes, out) });
+        check_encode_kernel(0, |bytes: &[u8; 12], out| unsafe { encode(bytes, out) });
     }
 
     #[target_feature(enable = "ssse3")]

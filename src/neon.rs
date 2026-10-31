@@ -23,16 +23,14 @@ base64_driver!(
     decode(
         chars: 64,
         spare: 0,
-        wide: decode_wide,
-        exact: decode_wide,
+        kernel: decode,
         narrow: crate::scalar::decode_quanta,
     ),
     encode(
         bytes: 48,
         window: 48,
         lead: 0,
-        wide: encode_wide,
-        exact: encode_wide,
+        kernel: encode,
         narrow: crate::scalar::encode_groups,
     ),
 );
@@ -43,6 +41,9 @@ base64_driver!(
 struct Bad(uint8x16_t);
 
 impl Bad {
+    /// Blocks are joined and tested once per group.
+    const EAGER: bool = false;
+
     #[inline]
     #[target_feature(enable = "neon")]
     fn none() -> Self {
@@ -76,7 +77,7 @@ impl Bad {
 /// Decodes 64 characters into 48 bytes.
 #[inline]
 #[target_feature(enable = "neon")]
-fn decode_wide(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; 48]) -> Bad {
+fn decode(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; 48]) -> Bad {
     // SAFETY: `chars` holds the 64 bytes the load reads.
     let chars = unsafe { vld4q_u8(chars.as_ptr()) };
     let (low, high) = (table(&DECODE_LOW), table(&DECODE_HIGH));
@@ -110,7 +111,7 @@ fn decode_wide(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; 48]) -> Bad {
 /// Encodes 48 bytes into 64 characters.
 #[inline]
 #[target_feature(enable = "neon")]
-fn encode_wide(bytes: &[u8; 48], out: &mut [MaybeUninit<u8>; 64]) {
+fn encode(bytes: &[u8; 48], out: &mut [MaybeUninit<u8>; 64]) {
     // SAFETY: `bytes` holds the 48 bytes the load reads.
     let bytes = unsafe { vld3q_u8(bytes.as_ptr()) };
     let mask = vdupq_n_u8(0x3f);
@@ -178,9 +179,9 @@ mod tests {
     #[test]
     fn kernels_match_scalar() {
         // SAFETY: the module only exists on targets guaranteeing NEON.
-        check_decode_kernel(|chars, out| unsafe { run(decode_wide(chars, out)) });
+        check_decode_kernel(|chars, out| unsafe { run(decode(chars, out)) });
         // SAFETY: as above.
-        check_encode_kernel(0, |bytes, out| unsafe { encode_wide(bytes, out) });
+        check_encode_kernel(0, |bytes, out| unsafe { encode(bytes, out) });
     }
 
     #[target_feature(enable = "neon")]

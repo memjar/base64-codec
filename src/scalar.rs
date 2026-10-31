@@ -40,20 +40,26 @@ const BAD: u8 = 67;
 /// Every byte's sextet, or its class when outside the alphabet.
 static CLASSES: [u8; 256] = classes();
 
+/// Every byte's sextet in place in the bytes of a quantum, one table per
+/// position: the lookups of its four characters joined are the quantum's
+/// bytes, and set the highest byte for a byte outside the alphabet.
+static QUANTA: [[u32; 256]; 4] = quanta();
+
+/// The characters of every pair of sextets, the first one high.
+static PAIRS: [[u8; 2]; 4096] = pairs();
+
 base64_driver!(
     decode(
         chars: 16,
         spare: 4,
-        wide: decode_block,
-        exact: decode_block,
+        kernel: decode_block,
         narrow: decode_quanta,
     ),
     encode(
         bytes: 12,
         window: 12,
         lead: 0,
-        wide: encode_block,
-        exact: encode_block,
+        kernel: encode_block,
         narrow: encode_groups,
     ),
 );
@@ -259,20 +265,17 @@ pub(crate) fn decode_tail(state: &mut DecodeState, symbols: &[u8], padded: bool)
     true
 }
 
-/// The length of `src` without the padding and blanks ending it, and whether
-/// they hold padding.
-pub(crate) fn trimmed(src: &[u8]) -> (usize, bool) {
+/// The length of `src` without the padding and blanks ending it.
+pub(crate) fn trimmed(src: &[u8]) -> usize {
     let mut end = src.len();
-    let mut padded = false;
 
     while let Some(&byte) = src[..end].last()
         && let PAD | NEWLINE | BLANK = CLASSES[byte as usize]
     {
-        padded |= byte == b'=';
         end -= 1;
     }
 
-    (end, padded)
+    end
 }
 
 /// Ends a decoder's input: writes the last partial quantum, and drops and
@@ -413,12 +416,15 @@ pub(crate) fn write_eol(out: &mut [MaybeUninit<u8>], eol: &[u8]) {
     }
 }
 
-/// The classes of the quanta of the blocks met, joined, a byte per quantum:
-/// one from `PAD` up holds a byte outside the alphabet.
+/// The quanta of the blocks met, joined, a byte per quantum: one is set when
+/// its quantum held a byte outside the alphabet.
 #[derive(Clone, Copy)]
 struct Bad(u32);
 
 impl Bad {
+    /// Blocks are joined and tested once per group.
+    const EAGER: bool = false;
+
     fn none() -> Self {
         Self(0)
     }
@@ -428,13 +434,13 @@ impl Bad {
     }
 
     fn any(self) -> bool {
-        self.0 & 0x4040_4040 != 0
+        self.0 != 0
     }
 
     /// The characters of the whole quanta before the first one holding a
     /// byte outside the alphabet.
     fn first(self) -> usize {
-        (self.0 & 0x4040_4040).trailing_zeros() as usize / 8 * 4
+        self.0.trailing_zeros() as usize / 8 * 4
     }
 }
 
@@ -447,12 +453,10 @@ fn decode_block<const N: usize>(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; N]
     let mut bad = 0;
 
     for (at, quad) in quads.iter().enumerate() {
-        let [a, b, c, d] = quad.map(|ch| CLASSES[ch as usize]);
-        bad |= ((a | b | c | d) as u32) << (8 * at);
-
-        let bits = (a as u32) << 26 | (b as u32) << 20 | (c as u32) << 14 | (d as u32) << 8;
+        let word = quantum(quad);
         let len = (N - at * 3).min(4);
-        out[at * 3..at * 3 + len].copy_from_slice(&bits.to_be_bytes().map(MaybeUninit::new)[..len]);
+        out[at * 3..at * 3 + len].copy_from_slice(&word.to_le_bytes().map(MaybeUninit::new)[..len]);
+        bad |= (word >> 24) << (8 * at);
     }
 
     Bad(bad)
@@ -467,22 +471,20 @@ fn encode_block(bytes: &[u8; 12], out: &mut [MaybeUninit<u8>; 16]) {
 /// Decodes the whole quanta of alphabet characters at the start of `src`
 /// that fit in `dst`, up to the first other byte, quantum by quantum,
 /// returning the characters read: what is shorter than a block of any
-/// backend.
+/// backend, and a block with a byte outside the alphabet.
 pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let (quads, _) = src.as_chunks::<4>();
     let (outs, _) = dst.as_chunks_mut::<3>();
     let mut read = 0;
 
     for (quad, out) in quads.iter().zip(outs) {
-        let [a, b, c, d] = quad.map(|ch| CLASSES[ch as usize]);
+        let [first, second, third, bad] = quantum(quad).to_le_bytes();
 
-        if (a | b | c | d) >= PAD {
+        if bad != 0 {
             break;
         }
 
-        let bits = (a as u32) << 18 | (b as u32) << 12 | (c as u32) << 6 | d as u32;
-        let [_, bytes @ ..] = bits.to_be_bytes();
-        *out = bytes.map(MaybeUninit::new);
+        *out = [first, second, third].map(MaybeUninit::new);
         read += 4;
     }
 
@@ -491,16 +493,18 @@ pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
 
 /// Encodes the whole groups at the start of `src` that fit in `dst`,
 /// returning the bytes read: two groups per step from one 64-bit word, as
-/// encodify 1.0.2's `encode_groups_scalar`, then the last one.
+/// encodify 1.0.2's `encode_groups_scalar`, then the last one, each pair of
+/// sextets looked up at once.
 #[inline]
 pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
-    let (pairs, _) = src.as_chunks::<6>();
+    let (groups, _) = src.as_chunks::<6>();
     let (outs, _) = dst.as_chunks_mut::<8>();
     let mut read = 0;
 
-    for (&[a, b, c, d, e, f], out) in pairs.iter().zip(outs) {
+    for (&[a, b, c, d, e, f], out) in groups.iter().zip(outs) {
         let bits = u64::from_be_bytes([0, 0, a, b, c, d, e, f]);
-        *out = [42, 36, 30, 24, 18, 12, 6, 0].map(|at| symbol(bits >> at));
+        let [p, q, r, s] = [36, 24, 12, 0].map(|at| PAIRS[(bits >> at & 0xfff) as usize]);
+        *out = [p[0], p[1], q[0], q[1], r[0], r[1], s[0], s[1]].map(MaybeUninit::new);
         read += 6;
     }
 
@@ -508,17 +512,21 @@ pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
         src[read..].first_chunk(),
         dst[read / 3 * 4..].first_chunk_mut(),
     ) {
-        let bits = u64::from_be_bytes([0, 0, 0, 0, 0, a, b, c]);
-        *out = [18, 12, 6, 0].map(|at| symbol(bits >> at));
+        let bits = u32::from_be_bytes([0, a, b, c]);
+        let [p, q] = [12, 0].map(|at| PAIRS[(bits >> at & 0xfff) as usize]);
+        *out = [p[0], p[1], q[0], q[1]].map(MaybeUninit::new);
         read += 3;
     }
 
     read
 }
 
-/// The character of the sextet in the low bits of `bits`.
-fn symbol(bits: u64) -> MaybeUninit<u8> {
-    MaybeUninit::new(ALPHABET[(bits & 63) as usize])
+/// The 3 bytes of a quantum, as the low bytes of a little-endian word whose
+/// highest byte is set when the quantum holds a byte outside the alphabet.
+#[inline]
+fn quantum(&[a, b, c, d]: &[u8; 4]) -> u32 {
+    let [first, second, third, fourth] = &QUANTA;
+    first[a as usize] | second[b as usize] | third[c as usize] | fourth[d as usize]
 }
 
 /// Writes the bytes a partial quantum of `pending` sextets ends with at the
@@ -555,6 +563,38 @@ const fn classes() -> [u8; 256] {
     classes[b' ' as usize] = BLANK;
     classes[b'\t' as usize] = BLANK;
     classes
+}
+
+const fn quanta() -> [[u32; 256]; 4] {
+    let mut quanta = [[0xff00_0000; 256]; 4];
+    let mut sextet = 0;
+
+    while sextet < 64 {
+        let mut at = 0;
+
+        while at < 4 {
+            // NOTE: the quantum's 24 bits, first sextet highest, shifted up
+            // a byte and swapped, so that its first byte comes first.
+            quanta[at][ALPHABET[sextet] as usize] = ((sextet as u32) << (26 - 6 * at)).swap_bytes();
+            at += 1;
+        }
+
+        sextet += 1;
+    }
+
+    quanta
+}
+
+const fn pairs() -> [[u8; 2]; 4096] {
+    let mut pairs = [[0; 2]; 4096];
+    let mut at = 0;
+
+    while at < 4096 {
+        pairs[at] = [ALPHABET[at >> 6], ALPHABET[at & 63]];
+        at += 1;
+    }
+
+    pairs
 }
 
 /// Checks a decode kernel, returning the characters it decoded before the

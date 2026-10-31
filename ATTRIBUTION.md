@@ -20,6 +20,10 @@ Hans Kratz <hans@appfour.com>, MIT OR Apache-2.0, https://github.com/rusticstuff
 - [src/driver.rs](src/driver.rs): the loops written once as a macro and stamped into each backend module under its target features, from src/implementation/algorithm.rs, and the error of several blocks joined into one vector and tested once.
 - [src/cpu.rs](src/cpu.rs): the backend picked from the build's target features when nothing is detected, from src/implementation/x86/mod.rs.
 
+## Scalar tables
+
+The scalar decode tables of [src/scalar.rs](src/scalar.rs), each byte's sextet already in place for its position in the quantum so that four lookups joined give the quantum's bytes and flag a byte outside the alphabet, follow Nick Galbreath's modp_b64 (BSD-3-Clause, https://github.com/client9/stringencoders), as Chromium's base64 uses it.
+
 ## AVX-512 VBMI method
 
 [src/avx512.rs](src/avx512.rs) implements Wojciech Muła and Daniel Lemire, "Base64 encoding and decoding at almost the speed of a memory copy", Software: Practice and Experience 50(2), 2020: decoding translated and validated by one `vpermi2b` lookup in a 128-byte table and packed with `maddubs`, `madd` and `vpermb`; encoding spread by `vpermb`, split by `vpmultishiftqb` and translated by `vpermb` in the alphabet.
