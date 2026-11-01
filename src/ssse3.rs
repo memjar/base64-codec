@@ -1,10 +1,7 @@
 //! # SSSE3 backend
 //!
-//! Base64 over 128-bit vectors, by Wojciech Muła and Daniel Lemire's method
-//! as encodify 1.0.2 implements it (src/base64/kernel/x86.rs): 16 characters
-//! into 12 bytes per decode step, 12 bytes into 16 characters per encode
-//! step, loaded from 4 bytes before them. Its loops also take what is shorter
-//! than one AVX2 block.
+//! Muła and Lemire's 128-bit kernels, as encodify 1.0.2 has them; its loops
+//! also take what is shorter than an AVX2 block.
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -51,8 +48,8 @@ impl Bad {
         self.first() < 16
     }
 
-    /// The characters of the whole quanta before the first one outside the
-    /// alphabet, 16 when there is none.
+    /// The characters of the whole quanta before the first bad one, 16 if
+    /// none.
     #[target_feature(enable = "ssse3")]
     fn first(self) -> usize {
         let valid = _mm_movemask_epi8(_mm_cmpeq_epi8(self.0, _mm_setzero_si128()));
@@ -60,15 +57,8 @@ impl Bad {
     }
 }
 
-/// Decodes 16 characters into the first 12 bytes of `out`, plus 4 spare ones
-/// when it holds 16: the first 16 of `chars`, or its first `split` and its
-/// last ones.
-///
-/// The high nibble of a character picks its class, and its low nibble, looked
-/// up as the character is, the classes it allows: a character from 128 up
-/// allows none. The high nibble also picks the offset to the sextet, `/`
-/// landing past 63, where the sextets are clamped. The four sextets of each
-/// 32-bit lane are then packed into three bytes.
+/// Decodes a block of 16 characters into 12 bytes, and 4 spare ones when
+/// `out` holds 16.
 #[inline]
 #[target_feature(enable = "ssse3")]
 fn decode<const C: usize, const N: usize>(
@@ -136,18 +126,8 @@ fn decode<const C: usize, const N: usize>(
     Bad(_mm_andnot_si128(allowed, class))
 }
 
-/// Encodes the `K` groups of 12 bytes `bytes` holds 12 bytes apart into 16
-/// characters each, from windows of 16 holding each group from their fifth
-/// byte or from a lone group; given room beyond 16, a line ending at `split`,
-/// as `spread` writes it.
-///
-/// Each 32-bit lane spread as `[b, a, c, b]` moves the two sextets of each
-/// 16-bit half into place with one low multiply, the first one shifted out of
-/// its high bits; each range of the alphabet, numbered by saturating
-/// arithmetic, then gets its offset from one lookup.
-///
-/// NOTE: the multipliers are powers of two hidden from the compiler, which
-/// otherwise rewrites the multiplies into slower shifts and blends.
+/// Encodes `K` groups of 12 bytes into 16 characters each, read alone or
+/// from windows of 16 holding them from their fifth byte.
 #[inline]
 #[target_feature(enable = "ssse3")]
 fn encode<const S: usize, const N: usize, const K: usize>(
@@ -214,9 +194,8 @@ fn encode<const S: usize, const N: usize, const K: usize>(
     }
 }
 
-/// `value` through an empty assembly block the compiler cannot see into, yet
-/// can hoist out of a loop since it is pure; as is under Miri, which runs no
-/// assembly.
+/// `value` hidden from the compiler, which would rewrite the multiplies by it
+/// into slower shifts and blends.
 #[inline]
 #[target_feature(enable = "ssse3")]
 #[cfg_attr(miri, allow(unused_mut))]

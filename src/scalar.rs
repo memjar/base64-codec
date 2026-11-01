@@ -1,39 +1,27 @@
 //! # Scalar backend
 //!
-//! The reference every SIMD backend matches, and the only code that handles
-//! anything but whole quanta of alphabet characters: padding, skipped and
-//! reported bytes, partial quanta, the carry between two calls and the end of
-//! an input. Its block kernels are table lookups, which the shared driver
-//! runs as it runs the SIMD ones, and its quantum and group loops take what
-//! is shorter than any block.
+//! The reference backend: table-lookup kernels for the driver, and the steps
+//! that alone handle padding, stray bytes, partial quanta, the carry between
+//! calls and the end of an input.
 
 use core::mem::MaybeUninit;
 
-/// The standard alphabet.
-///
-/// Refs: <https://datatracker.ietf.org/doc/html/rfc4648#section-4>
 pub(crate) const ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// Characters of an encoded line.
-///
-/// Refs: <https://datatracker.ietf.org/doc/html/rfc2045#section-6.8>
 pub(crate) const LINE: usize = 76;
-
-/// Bytes an encoded line holds.
 pub(crate) const LINE_BYTES: usize = LINE / 4 * 3;
 
-/// The fewest bytes `decode_bytes` takes before it hands back to the runs
-/// anywhere but at a line start.
+/// Bytes `decode_bytes` takes before handing back to the runs mid-line.
 const RESYNC: usize = 64;
 
-/// The class of `=`, and the lowest of the bytes outside the alphabet.
+/// The class of `=`, the lowest of the bytes outside the alphabet.
 const PAD: u8 = 64;
 const NEWLINE: u8 = 65;
 const BLANK: u8 = 66;
 const BAD: u8 = 67;
 
-/// Every byte's sextet, or its class when outside the alphabet.
+/// Every byte's sextet, or its class outside the alphabet.
 static CLASSES: [u8; 256] = {
     let mut classes = [BAD; 256];
     let mut sextet = 0;
@@ -51,12 +39,8 @@ static CLASSES: [u8; 256] = {
     classes
 };
 
-/// Every byte's sextet in place in the bytes of a quantum, one table per
-/// position: the lookups of its four characters joined are the quantum's
-/// bytes, with the highest byte set for a byte outside the alphabet.
-///
-/// A sextet sits in the quantum's 24 bits, the first one highest, shifted up a
-/// byte and swapped so that the first byte comes first.
+/// Per position in a quantum, every byte's sextet in place in its 3 bytes,
+/// or the high byte set outside the alphabet: four lookups joined decode it.
 static QUANTA: [[u32; 256]; 4] = {
     let mut quanta = [[0xff00_0000; 256]; 4];
     let mut sextet = 0;
@@ -104,16 +88,11 @@ base64_driver!(
     ),
 );
 
-/// A decoder's state between two calls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DecodeState {
-    /// The sextets of the quantum in progress, the first one highest.
     pub(crate) bits: u32,
-    /// How many sextets `bits` holds, from 0 to 3.
     pub(crate) pending: u8,
-    /// Whether padding was read since the last symbol.
     pub(crate) padded: bool,
-    /// Whether everything read so far was well-formed.
     pub(crate) clean: bool,
 }
 
@@ -128,16 +107,11 @@ impl DecodeState {
     }
 }
 
-/// An encoder's state between two calls.
 #[derive(Clone, Debug)]
 pub(crate) struct EncodeState {
-    /// Input bytes waiting for a whole group.
     pub(crate) carry: [u8; 2],
-    /// How many bytes `carry` holds.
     pub(crate) carried: u8,
-    /// Characters written on the current line.
     pub(crate) column: u8,
-    /// The line ending, empty when unwrapped.
     pub(crate) eol: &'static [u8],
 }
 
@@ -151,8 +125,8 @@ impl EncodeState {
         }
     }
 
-    /// The input bytes `encode_bytes` takes before the loops: up to the next
-    /// group, or the next line when wrapped.
+    /// The bytes `encode_bytes` takes before the loops: up to the next line
+    /// when wrapped, else the next group.
     pub(crate) fn lead(&self) -> usize {
         let carried = self.carried as usize;
 
@@ -167,8 +141,7 @@ impl EncodeState {
     }
 }
 
-/// The length of the line ending at the start of `src`: 2 for CRLF, 1 for LF
-/// alone, 0 for none.
+/// The length of the line ending `src` starts with, 0 for none.
 pub(crate) fn eol(src: &[u8]) -> usize {
     match src {
         [b'\r', b'\n', ..] => 2,
@@ -177,12 +150,8 @@ pub(crate) fn eol(src: &[u8]) -> usize {
     }
 }
 
-/// Decodes `src` byte by byte, with every lenient rule.
-///
-/// Stops at the end of `src` or before the first byte whose output does not
-/// fit in `dst`, returning true, or where the runs can take over, returning
-/// false: no partial quantum and no padding pending, at a line start or once
-/// `RESYNC` bytes are taken.
+/// Decodes `src` byte by byte with every lenient rule, done at its end or at
+/// a full `dst`, not done where the runs can take over.
 pub(crate) fn decode_bytes(
     state: &mut DecodeState,
     src: &[u8],
@@ -255,10 +224,8 @@ pub(crate) fn decode_bytes(
     (read, written, done)
 }
 
-/// Takes the at most three `symbols` left before the padding and blanks that
-/// end an input, `padded` when they hold padding, as `decode_bytes` would but
-/// for the line start; returns false, taking nothing, when one is not a
-/// symbol. The state holds no partial quantum and no padding.
+/// Takes the at most three `symbols` before an input's trimmed end into an
+/// empty `state`, or returns false when one is not a symbol.
 pub(crate) fn decode_tail(state: &mut DecodeState, symbols: &[u8], padded: bool) -> bool {
     let mut bits = 0;
 
@@ -292,8 +259,6 @@ pub(crate) fn trimmed(src: &[u8]) -> (usize, bool) {
     (end, padded)
 }
 
-/// Ends a decoder's input: writes the last partial quantum, and drops and
-/// reports a lone trailing symbol. Returns none when `dst` is too short.
 pub(crate) fn decode_finish(state: &mut DecodeState, dst: &mut [MaybeUninit<u8>]) -> Option<usize> {
     let len = flush(state.bits, state.pending, dst)?;
 
@@ -306,9 +271,8 @@ pub(crate) fn decode_finish(state: &mut DecodeState, dst: &mut [MaybeUninit<u8>]
     Some(len)
 }
 
-/// Encodes `src` into `dst` group by group, ending every full line when
-/// wrapped, and carries the last one or two bytes over to the next call.
-/// Stops before the first group that does not fit in `dst`.
+/// Encodes `src` group by group until one does not fit in `dst`, ending full
+/// lines when wrapped and carrying the last one or two bytes.
 pub(crate) fn encode_bytes(
     state: &mut EncodeState,
     src: &[u8],
@@ -363,8 +327,6 @@ pub(crate) fn encode_bytes(
     }
 }
 
-/// Ends an encoder's input: writes the last group, padded, and the last line
-/// ending when wrapped. Returns none when `dst` is too short.
 pub(crate) fn encode_finish(state: &mut EncodeState, dst: &mut [MaybeUninit<u8>]) -> Option<usize> {
     let chars = if state.carried == 0 { 0 } else { 4 };
 
@@ -384,9 +346,7 @@ pub(crate) fn encode_finish(state: &mut EncodeState, dst: &mut [MaybeUninit<u8>]
     Some(chars + eol)
 }
 
-/// Writes the padded quantum of the one or two bytes that end an input,
-/// returning the characters written: none for no byte, or when `dst` is
-/// shorter than a quantum.
+/// Writes the padded quantum of the last one or two bytes, when it fits.
 pub(crate) fn encode_tail(tail: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let quantum = match *tail {
         [first] => [
@@ -412,8 +372,7 @@ pub(crate) fn encode_tail(tail: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     4
 }
 
-/// Writes the line ending `eol` at the start of `out` when it has room, by
-/// plain stores rather than a copy call.
+/// Writes `eol` at the start of `out` when it fits, without a copy call.
 pub(crate) fn write_eol(out: &mut [MaybeUninit<u8>], eol: &[u8]) {
     match (eol, out) {
         ([cr, lf], [first, second, ..]) => {
@@ -427,8 +386,8 @@ pub(crate) fn write_eol(out: &mut [MaybeUninit<u8>], eol: &[u8]) {
     }
 }
 
-/// The quanta of the blocks met, joined, a byte per quantum, set when its
-/// quantum held a byte outside the alphabet.
+/// A byte per quantum of the blocks met, joined, set when it held a byte
+/// outside the alphabet.
 #[derive(Clone, Copy)]
 struct Bad(u32);
 
@@ -447,17 +406,14 @@ impl Bad {
         self.0 != 0
     }
 
-    /// The characters of the whole quanta before the first one holding a byte
-    /// outside the alphabet.
+    /// The characters of the whole quanta before the first bad one.
     fn first(self) -> usize {
         self.0.trailing_zeros() as usize / 8 * 4
     }
 }
 
-/// Decodes 16 characters into the first 12 bytes of `out`, each quantum
-/// stored as a 32-bit word whose spare byte the next one overwrites, the last
-/// one cut to 3 bytes when `out` has no spare: the first 16 of `chars`, or
-/// its first `split` and its last ones.
+/// Decodes a block of 16 characters into 12 bytes, each quantum stored as a
+/// word whose spare byte the next one overwrites.
 #[inline]
 fn decode_block<const C: usize, const N: usize>(
     chars: &[u8; C],
@@ -481,8 +437,7 @@ fn decode_block<const C: usize, const N: usize>(
     Bad(bad)
 }
 
-/// Encodes the `K` groups of 12 bytes of `bytes` into 16 characters each;
-/// given room beyond 16, a line ending at `split`, as `spread` writes it.
+/// Encodes `K` groups of 12 bytes into 16 characters each.
 #[inline]
 fn encode_block<const S: usize, const N: usize, const K: usize>(
     bytes: &[u8; S],
@@ -498,8 +453,7 @@ fn encode_block<const S: usize, const N: usize, const K: usize>(
     }
 }
 
-/// Decodes the whole quanta of alphabet characters at the start of `src` that
-/// fit in `dst`, quantum by quantum, returning the characters read.
+/// `Loops::decode_run` quantum by quantum.
 pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let (quads, _) = src.as_chunks::<4>();
     let (outs, _) = dst.as_chunks_mut::<3>();
@@ -519,10 +473,7 @@ pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     read
 }
 
-/// Encodes the whole groups at the start of `src` that fit in `dst`,
-/// returning the bytes read: two groups per step from one 64-bit word, as
-/// encodify 1.0.2's `encode_groups_scalar`, then the last one, each pair of
-/// sextets looked up at once.
+/// `Loops::encode_run` two groups a step, a pair of sextets a lookup.
 #[inline]
 pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let (groups, _) = src.as_chunks::<6>();
@@ -549,16 +500,15 @@ pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     read
 }
 
-/// The 3 bytes of a quantum, as the low bytes of a little-endian word whose
-/// highest byte is set when the quantum holds a byte outside the alphabet.
+/// The 3 bytes of a quantum in a little-endian word, the high byte set when
+/// a character is outside the alphabet.
 fn quantum(&[a, b, c, d]: &[u8; 4]) -> u32 {
     let [first, second, third, fourth] = &QUANTA;
     first[a as usize] | second[b as usize] | third[c as usize] | fourth[d as usize]
 }
 
-/// Writes the bytes a partial quantum of `pending` sextets ends with at the
-/// start of `out`, returning how many, or none when they do not fit: one for
-/// two sextets, two for three, none for one, whose bits are dropped.
+/// Writes the bytes of a partial quantum of `pending` sextets, a lone one
+/// dropped, or none when they do not fit.
 fn flush(bits: u32, pending: u8, out: &mut [MaybeUninit<u8>]) -> Option<usize> {
     match (pending, out) {
         (2, [first, ..]) => {
@@ -575,11 +525,8 @@ fn flush(bits: u32, pending: u8, out: &mut [MaybeUninit<u8>]) -> Option<usize> {
     }
 }
 
-/// Checks a decode kernel given a block and 2 characters more, returning the
-/// characters it decoded before the first one outside the alphabet, against
-/// `decode_quanta` over the block: every byte at every position of a valid
-/// block, the 2 characters past it, and a byte outside the alphabet at every
-/// position of a valid block stitched around CRLF at every split.
+/// Checks a decode kernel against `decode_quanta` for every byte at every
+/// position, and for a stray byte around CRLF at every split.
 #[cfg(test)]
 pub(crate) fn check_decode_kernel<const S: usize, const B: usize>(
     kernel: impl Fn(&[u8; S], usize, &mut [MaybeUninit<u8>; B]) -> usize,
@@ -623,10 +570,8 @@ pub(crate) fn check_decode_kernel<const S: usize, const B: usize>(
     }
 }
 
-/// Checks an encode kernel given room for 2 characters more against
-/// `encode_groups`: every byte at every position of its window, its group
-/// `lead` bytes in, and its characters split around those 2 at every
-/// quantum.
+/// Checks an encode kernel against `encode_groups` for every byte at every
+/// position, and for CRLF at every split.
 #[cfg(test)]
 pub(crate) fn check_encode_kernel<const W: usize, const N: usize>(
     lead: usize,

@@ -1,15 +1,10 @@
 //! # Decoding
 //!
-//! Lenient base64 decoding, as mail needs it: line breaks and blanks are
-//! skipped, every other byte outside the alphabet is skipped and reported,
-//! missing padding and non-zero trailing bits are accepted, symbols after
-//! padding are decoded as a new run and reported, and a lone trailing symbol
-//! is dropped and reported. Decoding never fails: it returns the bytes, and
-//! whether the input was clean.
-//!
-//! [`Base64Decode`] takes the input chunk by chunk; the one-shot
-//! [`Base64Codec::decode`] and `Base64Codec::decode_vec` decode a whole
-//! input. Encoding is the sibling module [`encode`](crate::encode).
+//! Lenient decoding that never fails, as mail needs it: blanks, line breaks,
+//! missing padding and trailing bits are clean; a stray byte (skipped), data
+//! after padding (decoded) and a lone last symbol (dropped) are not. Chunk
+//! by chunk with [`Base64Decode`], at once with [`Base64Codec::decode`].
+//! Encoding is the sibling [`encode`](crate::encode).
 
 use core::mem::MaybeUninit;
 
@@ -23,11 +18,7 @@ use crate::{
     scalar::{self, DecodeState, LINE, LINE_BYTES},
 };
 
-/// I/O-free base64 decoder, resumed with the caller's input and output
-/// buffers.
-///
-/// The input can be cut anywhere, mid-quantum included: the decoder carries
-/// at most three symbols from one call to the next.
+/// I/O-free decoder over the caller's buffers, the input cut anywhere.
 ///
 /// ```
 /// use base64_codec::{codec::Base64Codec, decode::Base64Decode};
@@ -52,8 +43,7 @@ pub struct Base64Decode {
 }
 
 impl Base64Decode {
-    /// Builds a decoder running the backend of `codec`, whatever its line
-    /// ending: decoding takes any.
+    /// A decoder with the backend of `codec`.
     pub fn new(codec: Base64Codec) -> Self {
         Self {
             cpu: codec.cpu,
@@ -61,11 +51,8 @@ impl Base64Decode {
         }
     }
 
-    /// Decodes as much of `src` as fits in `dst`.
-    ///
-    /// The caller drains `dst` and resumes with the rest of `src` or the
-    /// next chunk; three bytes of room always let the decoder progress. The
-    /// bytes of `dst` past the ones written may be overwritten.
+    /// Decodes as much of `src` as fits in `dst`, always progressing with
+    /// three bytes of room; bytes of `dst` past the written ones may change.
     pub fn resume(&mut self, src: &[u8], dst: &mut [u8]) -> Base64DecodeOutput {
         let (read, written) = self.run(src, driver::uninit(dst));
 
@@ -76,10 +63,8 @@ impl Base64Decode {
         }
     }
 
-    /// Ends the input: writes the last partial quantum, at most two bytes,
-    /// and drops and reports a lone trailing symbol.
-    ///
-    /// Returns none, writing nothing, when `dst` is too short.
+    /// Ends the input with the last partial quantum, at most two bytes, or
+    /// returns none, writing nothing, when `dst` is too short.
     pub fn finish(&mut self, dst: &mut [u8]) -> Option<Base64DecodeOutput> {
         let written = scalar::decode_finish(&mut self.state, driver::uninit(dst))?;
 
@@ -90,10 +75,6 @@ impl Base64Decode {
         })
     }
 
-    /// Decodes as much of `src` as fits in `dst`, returning the bytes read
-    /// and written: whole lines and runs of whole quanta, the line breaks
-    /// between them, and anything else byte by byte until the runs can take
-    /// over.
     fn run(&mut self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
         let state = &mut self.state;
         let (end, padded) = scalar::trimmed(src);
@@ -144,19 +125,16 @@ pub struct Base64DecodeOutput {
 
 /// One-shot decoding.
 impl Base64Codec {
-    /// Decodes the whole of `src` into `dst`.
-    ///
-    /// Returns none, writing nothing, when `dst` is shorter than
-    /// [`decoded_len_max`](Self::decoded_len_max) asks. Within that length,
-    /// the bytes of `dst` past the ones written may be overwritten.
+    /// Decodes all of `src` into the first
+    /// [`decoded_len_max`](Self::decoded_len_max) bytes of `dst`, any of which
+    /// may change, or returns none, writing nothing, when `dst` is shorter.
     #[inline]
     pub fn decode(self, src: &[u8], dst: &mut [u8]) -> Option<Base64DecodeOutput> {
         let dst = dst.get_mut(..self.decoded_len_max(src.len()))?;
         Some(self.decode_all(src, driver::uninit(dst)))
     }
 
-    /// Decodes the whole of `src` at the end of `out`, returning whether it
-    /// was well-formed.
+    /// Appends the decoding of `src` to `out`, returning whether it was clean.
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn decode_vec(self, src: &[u8], out: &mut Vec<u8>) -> bool {
@@ -171,16 +149,12 @@ impl Base64Codec {
         decoded.clean
     }
 
-    /// The most bytes [`decode`](Self::decode) writes for an input of `len`
-    /// bytes, whatever they hold.
+    /// The most bytes [`decode`](Self::decode) writes for `len` input bytes.
     pub const fn decoded_len_max(self, len: usize) -> usize {
         len - len.div_ceil(4)
     }
 
-    /// [`decode`](Self::decode) into a `dst` sized by
-    /// [`decoded_len_max`](Self::decoded_len_max): whole lines and one run
-    /// when the input ends as usual, anything else by a decoder from where
-    /// they stopped.
+    /// `decode` into a `dst` of `decoded_len_max` bytes or more.
     fn decode_all(self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> Base64DecodeOutput {
         let (end, _) = scalar::trimmed(src);
         let (read, mut written) = lines_and_run(self.cpu, &src[..end], dst);
@@ -213,8 +187,7 @@ impl Base64Codec {
     }
 }
 
-/// Decodes whole lines when `src` starts with a line of `LINE` characters,
-/// then one run, returning the bytes read and written.
+/// Decodes whole lines when `src` starts with one, then one run.
 #[inline(always)]
 fn lines_and_run(cpu: Base64Cpu, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
     let loops = cpu.loops();
@@ -241,7 +214,6 @@ mod tests {
 
     use crate::{cpu::available, decode::*};
 
-    /// The bytes and flag every backend decodes `input` to, checked equal.
     fn decoded(input: &[u8]) -> (Vec<u8>, bool) {
         let results: Vec<(Vec<u8>, bool)> = available()
             .into_iter()

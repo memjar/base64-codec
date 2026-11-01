@@ -1,13 +1,8 @@
 //! # AVX-512 backend
 //!
-//! Base64 over 512-bit vectors with the VBMI byte permutes, by Wojciech Muła
-//! and Daniel Lemire's method: 64 characters into 48 bytes per decode step,
-//! validated and translated by one lookup in a 128-byte table, and 48 bytes
-//! into 64 characters per encode step, spread by a permute, split by a
-//! multishift and translated by a lookup in the alphabet. What is shorter
-//! than one block is one block too, its load and store masked to it; whole
-//! blocks are not, as a masked access crossing into the next page costs about
-//! ten cycles.
+//! Muła and Lemire's VBMI kernels: one 128-byte table lookup decodes 64
+//! characters, permutes and a multishift encode 48 bytes. What is shorter
+//! than a block is one masked block.
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -17,8 +12,7 @@ use core::mem::MaybeUninit;
 
 use crate::scalar::ALPHABET;
 
-/// Every character below 128 mapped to its sextet, or to 128 outside the
-/// alphabet, in two halves of 64.
+/// The sextets of the characters below 128, 128 outside the alphabet.
 static DECODE: [[u8; 64]; 2] = {
     let mut table = [[128; 64]; 2];
     let mut sextet = 0;
@@ -32,8 +26,7 @@ static DECODE: [[u8; 64]; 2] = {
     table
 };
 
-/// The byte of `quads` each of the 48 decoded bytes comes from: the three low
-/// bytes of each 32-bit lane, highest first.
+/// The byte of `quads` each decoded byte comes from.
 static PACK: [u8; 64] = {
     let mut table = [0; 64];
     let mut at = 0;
@@ -46,8 +39,7 @@ static PACK: [u8; 64] = {
     table
 };
 
-/// The byte of the input each byte of the spread comes from: the three bytes
-/// of each group spread over a 32-bit lane as `[b, a, c, b]`.
+/// Each group's 3 bytes spread over a 32-bit lane as `[b, a, c, b]`.
 static SPREAD: [u8; 64] = {
     let mut table = [0; 64];
     let mut at = 0;
@@ -77,8 +69,7 @@ base64_driver!(
     ),
 );
 
-/// The characters outside the alphabet that blocks met, as bytes with their
-/// highest bit set.
+/// The characters outside the alphabet blocks met, their high bit set.
 #[derive(Clone, Copy)]
 struct Bad(__m512i);
 
@@ -100,17 +91,15 @@ impl Bad {
         _mm512_movepi8_mask(self.0) != 0
     }
 
-    /// The characters of the whole quanta before the first one outside the
-    /// alphabet.
+    /// The characters of the whole quanta before the first bad one.
     #[target_feature(enable = "avx512vbmi")]
     fn first(self) -> usize {
         _mm512_movepi8_mask(self.0).trailing_zeros() as usize / 4 * 4
     }
 }
 
-/// Decodes 64 characters into the first 48 bytes of `out`, plus 16 spare ones
-/// when it holds 64: the first 64 of `chars`, or its first `split` and its
-/// last ones.
+/// Decodes a block of 64 characters into 48 bytes, and 16 spare ones when
+/// `out` holds 64.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn decode<const C: usize, const N: usize>(
@@ -146,10 +135,8 @@ fn decode<const C: usize, const N: usize>(
     bad
 }
 
-/// Encodes the `K` groups of 48 bytes `bytes` holds 48 bytes apart into 64
-/// characters each, from the first 48 of windows of 64 or from a lone group;
-/// given room beyond 64, a line ending fills it at `split` when not past 64,
-/// the characters from `split` on moved past it.
+/// Encodes `K` groups of 48 bytes into 64 characters each, read alone or
+/// from windows of 64, a line ending blended into a masked store.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn encode<const S: usize, const N: usize, const K: usize>(
@@ -191,10 +178,8 @@ fn encode<const S: usize, const N: usize, const K: usize>(
     }
 }
 
-/// Decodes the whole quanta of alphabet characters at the start of `src` that
-/// fit in `dst`, fewer than a block, returning the characters read; quantum
-/// by quantum when one is outside the alphabet, so that the length waits on
-/// no test.
+/// `Loops::decode_run` below a block in one masked block, by `decode_quanta`
+/// when a character is outside the alphabet.
 #[target_feature(enable = "avx512vbmi")]
 fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let chars = (src.len() / 4).min(dst.len() / 3).min(15) * 4;
@@ -213,8 +198,7 @@ fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     chars
 }
 
-/// Encodes the whole groups at the start of `src` that fit in `dst`, fewer
-/// than a block, returning the bytes read.
+/// `Loops::encode_run` below a block in one masked block.
 #[target_feature(enable = "avx512vbmi")]
 fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let bytes = (src.len() / 3).min(dst.len() / 4).min(15) * 3;
@@ -228,9 +212,7 @@ fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     bytes
 }
 
-/// The 48 bytes of 64 characters, first in the vector, and the characters
-/// outside the alphabet: one from 128 up, or one the table maps to 128, has
-/// its highest bit set once joined with its sextet.
+/// The 48 bytes of 64 characters, first in the vector, and their `Bad`.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn decode_vector(chars: __m512i) -> (__m512i, Bad) {
@@ -243,10 +225,7 @@ fn decode_vector(chars: __m512i) -> (__m512i, Bad) {
     (bytes, Bad(_mm512_or_si512(chars, sextets)))
 }
 
-/// The 64 characters of 48 bytes: each 32-bit lane spread as `[b, a, c, b]`
-/// holds the four sextets of its group at bits 10, 4, 22 and 16, which one
-/// multishift moves into its bytes; the alphabet lookup ignores the two bits
-/// above each sextet.
+/// The 64 characters of 48 bytes.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn encode_vector(bytes: __m512i) -> __m512i {
@@ -261,7 +240,7 @@ fn vector(bytes: &[u8; 64]) -> __m512i {
     unsafe { _mm512_loadu_si512(bytes.as_ptr().cast()) }
 }
 
-/// The mask of the first `len` bytes of a vector, `len` below 64.
+/// The mask of a vector's first `len` bytes, `len` below 64.
 fn mask(len: usize) -> u64 {
     (1 << len) - 1
 }

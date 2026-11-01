@@ -1,13 +1,7 @@
 //! # AVX2 backend
 //!
-//! The SSSE3 method over 256-bit vectors, 32 characters into 24 bytes per
-//! decode step and 24 bytes into 32 characters per encode step, as encodify
-//! 1.0.2 implements it (src/base64/kernel/x86.rs). The shuffles stay within
-//! each 128-bit lane, so the 12 bytes each lane packs are stored apart, or
-//! moved together first for an exact store, and an encode step loads its 24
-//! bytes from 4 bytes before them, which lands the 12 bytes of each lane in
-//! place. What is shorter than one block goes to the SSSE3 loops, which AVX2
-//! implies.
+//! The SSSE3 kernels over 256-bit vectors, as encodify 1.0.2 has them; what
+//! is shorter than a block goes to the SSSE3 loops.
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -32,14 +26,12 @@ base64_driver!(
     ),
 );
 
-/// The classes the low nibbles of a block's characters allow, and the classes
-/// of their high nibbles: a character whose class its low nibble does not
-/// allow is outside the alphabet.
+/// Per character, the classes its low nibble allows and its high nibble's
+/// class, not allowed outside the alphabet.
 #[derive(Clone, Copy)]
 struct Bad(__m256i, __m256i);
 
 impl Bad {
-    /// One `vptest` per block costs less than joining the blocks of a group.
     const EAGER: bool = true;
 
     #[target_feature(enable = "avx2")]
@@ -56,8 +48,7 @@ impl Bad {
         _mm256_testc_si256(self.0, self.1) == 0
     }
 
-    /// The characters of the whole quanta before the first one outside the
-    /// alphabet.
+    /// The characters of the whole quanta before the first bad one.
     #[target_feature(enable = "avx2")]
     fn first(self) -> usize {
         let bad = _mm256_cmpeq_epi8(_mm256_andnot_si256(self.0, self.1), _mm256_setzero_si256());
@@ -65,12 +56,8 @@ impl Bad {
     }
 }
 
-/// Decodes 32 characters into the first 24 bytes of `out` by the SSSE3 method
-/// over both lanes, plus 4 spare ones when it holds 28: the first 32 of
-/// `chars`, or its first `split` and its last ones.
-///
-/// The low-nibble table holds the classes each low nibble allows, the
-/// complement of the SSSE3 one.
+/// Decodes a block of 32 characters into 24 bytes, and 4 spare ones when
+/// `out` holds 28.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn decode<const C: usize, const N: usize>(
@@ -138,8 +125,7 @@ fn decode<const C: usize, const N: usize>(
             );
         }
     } else {
-        // SAFETY: the stores write the 28 bytes of `out`, the second over the
-        // first lane's spare ones.
+        // SAFETY: the stores write the 28 bytes of `out`.
         unsafe {
             _mm_storeu_si128(out.as_mut_ptr().cast(), _mm256_castsi256_si128(bytes));
             _mm_storeu_si128(
@@ -152,15 +138,8 @@ fn decode<const C: usize, const N: usize>(
     Bad(allowed, class)
 }
 
-/// Encodes the `K` groups of 24 bytes `bytes` holds 24 bytes apart into 32
-/// characters each by the SSSE3 method over both lanes, every step across the
-/// groups before the next: from windows of 32 holding each group from their
-/// fifth byte, in one load landing each lane's 12 bytes in place, or from a
-/// lone group, its halves loaded into their lanes; given room beyond 32, a
-/// line ending at `split`, as `spread` writes it.
-///
-/// NOTE: the steps of one block are a chain, which fills the scheduler: four
-/// blocks a step at a time encode 3% faster.
+/// Encodes `K` groups of 24 bytes into 32 characters each, read alone or
+/// from windows of 32 holding them from their fifth byte.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn encode<const S: usize, const N: usize, const K: usize>(

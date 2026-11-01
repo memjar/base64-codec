@@ -1,7 +1,5 @@
-//! Throughput of base64-codec against the base64 crate, base64-simd and
-//! encodify, encoding and decoding, unwrapped and in CRLF lines of 76
-//! characters, from 64 bytes to 10 MiB. Throughput counts the raw bytes, on
-//! both sides.
+//! base64-codec against the base64 crate, base64-simd and encodify, from 64
+//! bytes to 10 MiB, unwrapped and in CRLF lines, as benches/README.md tells.
 
 use std::{hint::black_box, time::Duration};
 
@@ -43,8 +41,6 @@ fn cpus() -> Vec<(&'static str, Base64Cpu)> {
     cpus
 }
 
-/// AVX2 apart when AVX-512 is detected, to compare it with encodify on the
-/// same instructions.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn avx2() -> Option<(&'static str, Base64Cpu)> {
     let avx512 = Base64Cpu::detect().backend() == Base64Backend::Avx512;
@@ -109,8 +105,6 @@ fn encodes(c: &mut Criterion) {
                     });
                 }
                 Some(_) => {
-                    // NOTE: the base64 crate has no wrapping: lines of 57
-                    // bytes, as mime-rs's wrapper writes them.
                     group.bench_with_input(BenchmarkId::new("base64", size), &src, |b, src| {
                         b.iter(|| {
                             let mut written = 0;
@@ -152,8 +146,6 @@ fn decodes(c: &mut Criterion) {
             let mut src = vec![0; baseline.encoded_len(size).unwrap()];
             baseline.encode(&raw, &mut src).unwrap();
 
-            // NOTE: as long as the input, which base64-simd's forgiving
-            // decoder asks for.
             let mut out = vec![0; src.len() + 64];
             group.throughput(Throughput::Bytes(size as u64));
 
@@ -187,8 +179,6 @@ fn decodes(c: &mut Criterion) {
                         b.iter(|| ENCODIFY.decode_slice(black_box(src), &mut out))
                     });
 
-                    // NOTE: encodify's lenient engine, the one whose rules
-                    // are base64-codec's, on the same input.
                     group.bench_with_input(
                         BenchmarkId::new("encodify lenient", size),
                         &src,
@@ -196,8 +186,6 @@ fn decodes(c: &mut Criterion) {
                     );
                 }
                 Some(_) => {
-                    // NOTE: the base64 crate rejects line breaks: line by
-                    // line, as mime-rs's wrapper reads them.
                     group.bench_with_input(BenchmarkId::new("base64", size), &src, |b, src| {
                         b.iter(|| {
                             let mut written = 0;

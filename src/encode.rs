@@ -1,13 +1,9 @@
 //! # Encoding
 //!
-//! Base64 encoding with padding, unwrapped (as an RFC 2047 B encoded word
-//! needs) or in lines of 76 characters, each ended by CRLF or LF, the last
-//! one included (as a MIME body needs).
-//!
-//! [`Base64Encode`] takes the input chunk by chunk; the one-shot
-//! [`Base64Codec::encode`] and `Base64Codec::encode_vec` encode a whole input
-//! in one pass, with no carry to keep. Decoding is the sibling module
-//! [`decode`](crate::decode).
+//! Padded base64, unwrapped as RFC 2047 B words need, or in lines of 76
+//! characters each ended by CRLF or LF, the last one included, as MIME bodies
+//! need: chunk by chunk with [`Base64Encode`], at once with
+//! [`Base64Codec::encode`]. Decoding is the sibling [`decode`](crate::decode).
 
 use core::mem::MaybeUninit;
 
@@ -21,24 +17,12 @@ use crate::{
     scalar::{self, EncodeState, LINE, LINE_BYTES},
 };
 
-/// I/O-free base64 encoder, resumed with the caller's input and output
-/// buffers.
-///
-/// The input can be cut anywhere: the encoder carries at most two bytes from
-/// one call to the next.
+/// I/O-free encoder over the caller's buffers, the input cut anywhere.
 ///
 /// ```
-/// use base64_codec::{
-///     codec::{Base64Codec, Base64Eol},
-///     encode::Base64Encode,
-/// };
+/// use base64_codec::{codec::Base64Codec, encode::Base64Encode};
 ///
-/// let codec = Base64Codec {
-///     wrap: Some(Base64Eol::Crlf),
-///     ..Base64Codec::BASELINE
-/// };
-///
-/// let mut encoder = Base64Encode::new(codec);
+/// let mut encoder = Base64Encode::new(Base64Codec::BASELINE);
 /// let mut out = [0; 16];
 ///
 /// let first = encoder.resume(b"hel", &mut out);
@@ -46,7 +30,7 @@ use crate::{
 /// let written = first.written + second.written;
 /// let end = encoder.finish(&mut out[written..]).unwrap();
 ///
-/// assert_eq!(&out[..written + end], b"aGVsbG8=\r\n");
+/// assert_eq!(&out[..written + end], b"aGVsbG8=");
 /// ```
 ///
 /// Refs: <https://datatracker.ietf.org/doc/html/rfc4648#section-4>
@@ -57,7 +41,7 @@ pub struct Base64Encode {
 }
 
 impl Base64Encode {
-    /// Builds an encoder running the backend and the line ending of `codec`.
+    /// An encoder with the backend and line ending of `codec`.
     pub fn new(codec: Base64Codec) -> Self {
         Self {
             cpu: codec.cpu,
@@ -65,28 +49,19 @@ impl Base64Encode {
         }
     }
 
-    /// Encodes as much of `src` as fits in `dst`.
-    ///
-    /// The caller drains `dst` and resumes with the rest of `src` or the
-    /// next chunk; six bytes of room always let the encoder progress.
+    /// Encodes as much of `src` as fits in `dst`, always progressing with six
+    /// bytes of room.
     pub fn resume(&mut self, src: &[u8], dst: &mut [u8]) -> Base64EncodeOutput {
         let (read, written) = self.run(src, driver::uninit(dst));
         Base64EncodeOutput { read, written }
     }
 
-    /// Ends the input: writes the last group, padded, and the last line
-    /// ending when wrapped, at most six bytes.
-    ///
-    /// Returns the bytes written, or none, writing nothing, when `dst` is
-    /// too short.
+    /// Ends the input with the padded last group and line ending, at most
+    /// six bytes, or returns none, writing nothing, when `dst` is too short.
     pub fn finish(&mut self, dst: &mut [u8]) -> Option<usize> {
         scalar::encode_finish(&mut self.state, driver::uninit(dst))
     }
 
-    /// Encodes as much of `src` as fits in `dst`, returning the bytes read
-    /// and written: group by group up to the next line, or the next group
-    /// when unwrapped, then whole lines or a whole run, then group by group
-    /// again, carrying what is left.
     fn run(&mut self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
         let state = &mut self.state;
         let lead = state.lead().min(src.len());
@@ -129,10 +104,8 @@ pub struct Base64EncodeOutput {
 
 /// One-shot encoding.
 impl Base64Codec {
-    /// Encodes the whole of `src` into `dst`, returning the bytes written.
-    ///
-    /// Returns none, writing nothing, when `dst` is shorter than
-    /// [`encoded_len`](Self::encoded_len) asks.
+    /// Encodes all of `src` into `dst`, or returns none, writing nothing, when
+    /// it is shorter than [`encoded_len`](Self::encoded_len).
     #[inline]
     pub fn encode(self, src: &[u8], dst: &mut [u8]) -> Option<usize> {
         let len = self.encoded_len(src.len())?;
@@ -140,7 +113,7 @@ impl Base64Codec {
         Some(self.encode_all(src, driver::uninit(dst)))
     }
 
-    /// Encodes the whole of `src` at the end of `out`.
+    /// Appends the encoding of `src` to `out`.
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn encode_vec(self, src: &[u8], out: &mut Vec<u8>) {
@@ -161,10 +134,7 @@ impl Base64Codec {
         chars.checked_add(lines.checked_mul(self.eol().len())?)
     }
 
-    /// [`encode`](Self::encode) into a `dst` sized by
-    /// [`encoded_len`](Self::encoded_len), with no [`Base64Encode`] state:
-    /// one run and the padded tail when unwrapped, else whole lines first and
-    /// the last line ending after the tail.
+    /// `encode` into a `dst` of `encoded_len` bytes or more.
     fn encode_all(self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
         let loops = self.cpu.loops();
         let eol = self.eol();
@@ -203,7 +173,6 @@ mod tests {
 
     const CRLF: Option<Base64Eol> = Some(Base64Eol::Crlf);
 
-    /// What every backend encodes `input` to, checked equal.
     fn encoded(input: &[u8], wrap: Option<Base64Eol>) -> Vec<u8> {
         let results: Vec<Vec<u8>> = available()
             .into_iter()

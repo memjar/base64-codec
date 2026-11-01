@@ -1,18 +1,13 @@
 //! # NEON backend
 //!
-//! Base64 over 128-bit NEON vectors, by the method encodify 1.0.2 implements
-//! (src/base64/kernel/neon.rs), which is not the x86 one: a step loads 64
-//! characters deinterleaved into four vectors, one per position in the
-//! quantum, so that packing is three shifts and an interleaving store of 48
-//! bytes, and translates them with 64-byte table lookups. What is shorter
-//! than one block goes to the scalar loops.
+//! encodify 1.0.2's NEON kernels: deinterleaving loads and stores, 64-byte
+//! table lookups. What is shorter than a block goes to the scalar loops.
 
 use core::{arch::aarch64::*, mem::MaybeUninit};
 
 use crate::scalar::ALPHABET;
 
-/// The characters below 64, each mapped to its sextet plus one, or to zero
-/// outside the alphabet.
+/// Each character below 64 as its sextet plus one, or 0 outside the alphabet.
 static DECODE_LOW: [u8; 64] = decode_table(0);
 
 /// The characters from 64 to 127, less 64, mapped as in `DECODE_LOW`.
@@ -35,8 +30,8 @@ base64_driver!(
     ),
 );
 
-/// The least translated character of each quantum that blocks met: a zero
-/// lane means a character outside the alphabet.
+/// The least translated character per quantum of the blocks met, 0 when one
+/// is outside the alphabet.
 #[derive(Clone, Copy)]
 struct Bad(uint8x16_t);
 
@@ -58,9 +53,7 @@ impl Bad {
         vminvq_u8(self.0) == 0
     }
 
-    /// The characters of the whole quanta before the first one outside the
-    /// alphabet: the zero lanes, narrowed to 4 bits each, count 4 trailing
-    /// zeros per quantum before them.
+    /// The characters of the whole quanta before the first bad one.
     #[target_feature(enable = "neon")]
     fn first(self) -> usize {
         let zero = vreinterpretq_u16_u8(vceqzq_u8(self.0));
@@ -69,9 +62,7 @@ impl Bad {
     }
 }
 
-/// Decodes 64 characters into 48 bytes: the first 64 of `chars`, or its first
-/// `split` and its last ones, picked quantum by quantum from the
-/// deinterleaved vectors.
+/// Decodes a block of 64 characters into 48 bytes.
 #[inline]
 #[target_feature(enable = "neon")]
 fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<u8>; 48]) -> Bad {
@@ -121,8 +112,7 @@ fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<
     bad
 }
 
-/// Encodes the `K` groups of 48 bytes of `bytes` into 64 characters each;
-/// given room beyond 64, a line ending at `split`, as `spread` writes it.
+/// Encodes `K` groups of 48 bytes into 64 characters each.
 #[inline]
 #[target_feature(enable = "neon")]
 fn encode<const S: usize, const N: usize, const K: usize>(
@@ -166,8 +156,7 @@ fn encode<const S: usize, const N: usize, const K: usize>(
     }
 }
 
-/// Each character's sextet plus one, or zero outside the alphabet: the two
-/// tables cover the characters below 128 and give zero for any other.
+/// Each character's sextet plus one, or 0 outside the alphabet.
 #[inline]
 #[target_feature(enable = "neon")]
 fn translate(chars: uint8x16_t, low: uint8x16x4_t, high: uint8x16x4_t) -> uint8x16_t {

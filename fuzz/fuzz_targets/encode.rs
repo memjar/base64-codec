@@ -1,6 +1,5 @@
-//! Every backend encodes any input, in one call or resumed over chunks of
-//! any size into a buffer of any size, to the characters of the scalar
-//! backend, which decode back to the input, clean.
+//! Every backend encodes any input, one-shot or resumed over any chunks and
+//! room, to the characters of scalar, which decode back clean.
 
 #![no_main]
 
@@ -64,7 +63,6 @@ fn one_shot(input: &[u8], codec: Base64Codec) -> Vec<u8> {
     out
 }
 
-/// Every token the running CPU supports.
 fn cpus() -> Vec<Base64Cpu> {
     let detected = Base64Cpu::detect();
     let mut cpus = vec![detected];
@@ -72,7 +70,6 @@ fn cpus() -> Vec<Base64Cpu> {
     cpus
 }
 
-/// The tokens below `detected` that the running CPU supports too.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn below(detected: Base64Backend) -> Vec<Base64Cpu> {
     let backends: &[Base64Backend] = match detected {

@@ -1,62 +1,42 @@
 //! # Driver
 //!
-//! The loops of a backend, written once as `base64_driver!` and stamped into
-//! each backend module under its target features, so that its kernels inline
-//! into them, as simdutf8 0.1.5 stamps its algorithm. The decoder and the
-//! encoder call them through the backend's [`Loops`].
-//!
-//! A backend defines `Bad`, the characters outside the alphabet a decode
-//! kernel met, and two kernels. The decode kernel decodes a block, then as
-//! many spare bytes as its output has room for; given more characters than a
-//! block, it takes those before `split` and the last ones, which leaves out a
-//! line break. The encode kernel encodes `K` groups a group apart, each read
-//! from a window around it, or a lone group; given more room than a block's
-//! characters, it writes those from `split` on that much further and a line
-//! ending of that length at `split`, when `split` is not past them.
-//!
-//! A run ends with a block overlapping the one before, as a quantum decodes
-//! to the same bytes wherever it falls. Lines of 76 characters go a period at
-//! a time: the lines whose characters make 19 blocks, 76 being 4 times 19,
-//! each block's place a constant.
+//! The loops of every backend, written once as `base64_driver!` and stamped
+//! into each backend under its target features so that its kernels inline,
+//! called through [`Loops`]. Runs end with a block overlapping the one
+//! before; lines of 76 characters go a period at a time, the lines whose
+//! characters make 19 blocks.
 
 use core::mem::MaybeUninit;
 
-/// A loop of a backend over `src` into `dst`, unsafe to call on a CPU without
-/// the backend's features.
+/// A backend loop, unsafe on a CPU without the backend's features.
 pub(crate) type Run = unsafe fn(&[u8], &mut [MaybeUninit<u8>]) -> usize;
 
-/// The loops of a backend.
+/// The loops of a backend over the start of `src` and what fits in `dst`,
+/// the line ones for LF then CRLF.
 pub(crate) struct Loops {
-    /// Decodes the whole quanta of alphabet characters at the start of `src`
-    /// that fit in `dst`, returning the characters read.
+    /// Decodes whole quanta of alphabet characters, returning their length.
     pub(crate) decode_run: Run,
-    /// Decodes whole lines of `LINE` characters, ended by LF then by CRLF,
-    /// while well formed and fitting in `dst`, returning how many.
+    /// Decodes whole well-formed lines, returning how many.
     pub(crate) decode_lines: [Run; 2],
-    /// Encodes the whole groups at the start of `src` that fit in `dst`,
-    /// returning the bytes read.
+    /// Encodes whole groups, returning their length.
     pub(crate) encode_run: Run,
-    /// Encodes the whole lines of `src` that fit in `dst`, ended by LF then
-    /// by CRLF, returning how many.
+    /// Encodes whole lines, returning how many.
     pub(crate) encode_lines: [Run; 2],
 }
 
-/// `dst` as the uninitialised bytes the kernels write into.
 pub(crate) fn uninit(dst: &mut [u8]) -> &mut [MaybeUninit<u8>] {
     // SAFETY: same layout, and only initialised bytes are written through it.
     unsafe { &mut *(dst as *mut [u8] as *mut [MaybeUninit<u8>]) }
 }
 
-/// The mask of a block stitched at `split`, at most 32: its bytes from the
-/// split on are set.
+/// A mask whose bytes from `split` on are set, `split` at most 32.
 pub(crate) fn stitch(split: usize) -> &'static [u8] {
     static MASKS: [[u8; 32]; 2] = [[0; 32], [0xff; 32]];
     &MASKS.as_flattened()[32 - split..]
 }
 
-/// Moves the characters of `out` from `split` to `chars` past the room left at
-/// its end, a quantum at a time from the last, and writes the line ending of
-/// that length at `split` when it is not past `chars`.
+/// Writes a line ending at `split` as long as the room past `chars`, moving
+/// the characters after it, when `split` is not past `chars`.
 #[inline]
 pub(crate) fn spread(out: &mut [MaybeUninit<u8>], split: usize, chars: usize) {
     let gap = out.len() - chars;
@@ -76,11 +56,8 @@ pub(crate) fn spread(out: &mut [MaybeUninit<u8>], split: usize, chars: usize) {
     }
 }
 
-/// Expands `$body` once per block of a period, `$block` a constant from 0 to
-/// 18.
-///
-/// NOTE: written out, as LLVM rolls the blocks of a loop back into one that
-/// works each block's place out at run time.
+/// Expands `$body` once per block of a period, `$block` a constant from 0
+/// to 18: as a loop, LLVM rolls the blocks back up.
 macro_rules! base64_period {
     ($block:ident => $body:block) => {
         base64_period!(@ $block $body 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)
@@ -93,10 +70,10 @@ macro_rules! base64_period {
     };
 }
 
-/// Stamps a backend's `LOOPS` from its kernels: for decoding, the characters
-/// of a block, the spare bytes its kernel writes and the narrower run; for
-/// encoding, the bytes of a block, the window its kernel reads, the lead of
-/// the group in it and the narrower run.
+/// Stamps a backend's `LOOPS` from its `Bad` and kernels: `decode` takes a
+/// block from the first `split` characters and the last ones, skipping a
+/// line break; `encode` takes `K` groups, alone or `lead` bytes into a
+/// `window`, and writes a line ending at `split` when given room.
 macro_rules! base64_driver {
     (
         $(#[$attr:meta])*
@@ -114,7 +91,6 @@ macro_rules! base64_driver {
             narrow: $encode_narrow:path $(,)?
         ) $(,)?
     ) => {
-        /// The loops of the backend.
         pub(crate) const LOOPS: crate::driver::Loops = crate::driver::Loops {
             decode_run,
             decode_lines: [
@@ -128,10 +104,6 @@ macro_rules! base64_driver {
             ],
         };
 
-        /// `Loops::decode_run`: in blocks, or by the narrower run below one.
-        ///
-        /// NOTE: the blocks are a function of their own, so that a short run
-        /// saves no register.
         $(#[$attr])*
         pub(crate) fn decode_run(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             let chars = (src.len() / 4).min(dst.len() / 3) * 4;
@@ -143,11 +115,7 @@ macro_rules! base64_driver {
             decode_blocks(&src[..chars], dst)
         }
 
-        /// Decodes `src`, whole quanta of a block or more, up to its first
-        /// character outside the alphabet: groups of four blocks writing spare
-        /// bytes while those stay within the run's output, tested once unless
-        /// `Bad::EAGER`, then single blocks, the last one ending at the run's
-        /// end.
+        /// `decode_run` from a block on: four-block groups, then single blocks.
         $(#[$attr])*
         #[inline(never)]
         fn decode_blocks(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
@@ -214,12 +182,7 @@ macro_rules! base64_driver {
         }
 
         /// `Loops::decode_lines` with `C - $chars` bytes of line ending and
-        /// `SPAN` bytes a period: in periods when there are lines enough and
-        /// blocks of 32 characters or more, else line by line, the last line by
-        /// `decode_blocks` when its spare bytes do not fit.
-        ///
-        /// NOTE: periods of 16-character blocks measured level for SSSE3 and
-        /// slower for scalar.
+        /// `SPAN` bytes a period.
         $(#[$attr])*
         #[inline(never)]
         fn decode_lines<const C: usize, const SPAN: usize>(
@@ -275,10 +238,7 @@ macro_rules! base64_driver {
             lines
         }
 
-        /// `decode_lines` over the first `lines` lines of `src`, in whole
-        /// periods, a block across a line break stitched from its two lines,
-        /// then line by line over the lines left or those of a period that
-        /// failed.
+        /// `decode_lines` over the first `lines` lines, whole periods first.
         $(#[$attr])*
         #[inline(never)]
         fn decode_periods<const C: usize, const SPAN: usize>(
@@ -339,7 +299,6 @@ macro_rules! base64_driver {
             done + decode_lines::<C, SPAN>(&src[done * span..(done + rest) * span], &mut dst[done * LEN..])
         }
 
-        /// `Loops::encode_run`: in blocks, or by the narrower run below one.
         $(#[$attr])*
         pub(crate) fn encode_run(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             let bytes = (src.len() / 3).min(dst.len() / 4) * 3;
@@ -351,13 +310,8 @@ macro_rules! base64_driver {
             encode_blocks(&src[..bytes], dst)
         }
 
-        /// Encodes `src`, whole groups of a block or more: the first block,
-        /// then steps of four blocks reading windows around their groups, then
-        /// single blocks reading their group alone where no window fits, the
-        /// last one ending at the run's end.
-        ///
-        /// NOTE: blocks of 64 characters store whole cache lines, up to 15%
-        /// faster aligned, so their steps start at the first aligned one.
+        /// `encode_run` from a block on: steps of four blocks, from the first
+        /// cache line for 64-character blocks, then single ones.
         $(#[$attr])*
         #[inline(never)]
         fn encode_blocks(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
@@ -412,9 +366,8 @@ macro_rules! base64_driver {
             bytes
         }
 
-        /// `Loops::encode_lines` with `N` less a block's characters bytes of
-        /// line ending, written by plain stores, and `SPAN` bytes a period: in
-        /// periods when there are lines enough, else line by line.
+        /// `Loops::encode_lines` with `N - CHARS` bytes of line ending and
+        /// `SPAN` bytes a period.
         $(#[$attr])*
         #[inline(never)]
         fn encode_lines<const N: usize, const SPAN: usize>(
@@ -455,9 +408,7 @@ macro_rules! base64_driver {
             lines
         }
 
-        /// `encode_lines` over the first `lines` lines of `src`, in whole
-        /// periods reading windows where they fit, a block across a line break
-        /// split around it, then line by line over the lines left.
+        /// `encode_lines` over the first `lines` lines, whole periods first.
         $(#[$attr])*
         #[inline(never)]
         fn encode_periods<const N: usize, const SPAN: usize>(
@@ -518,7 +469,6 @@ mod tests {
 
     const WRAPS: [Option<Base64Eol>; 3] = [None, Some(Base64Eol::Crlf), Some(Base64Eol::Lf)];
 
-    /// A xorshift generator, so that every run tests the same inputs.
     struct Rng(u64);
 
     impl Rng {
@@ -534,7 +484,6 @@ mod tests {
         }
     }
 
-    /// Decoding through the scalar steps alone, byte by byte.
     fn reference_decode(src: &[u8]) -> (Vec<u8>, bool) {
         let mut state = DecodeState::new();
         let mut out = vec![0; Base64Codec::BASELINE.decoded_len_max(src.len())];
@@ -557,7 +506,6 @@ mod tests {
         (out, state.clean)
     }
 
-    /// Encoding through the scalar steps alone, group by group.
     fn reference_encode(src: &[u8], wrap: Option<Base64Eol>) -> Vec<u8> {
         let eol: &'static [u8] = match wrap {
             None => b"",
@@ -586,7 +534,6 @@ mod tests {
         (out, output.clean)
     }
 
-    /// The one-shot encoding, checked to write the length it asks.
     fn one_shot_encode(src: &[u8], codec: Base64Codec) -> Vec<u8> {
         let mut out = vec![0; codec.encoded_len(src.len()).unwrap()];
         let written = codec.encode(src, &mut out).unwrap();
@@ -594,7 +541,6 @@ mod tests {
         out
     }
 
-    /// `encoded` rewrapped in lines of `width` characters ended by `eol`.
     fn rewrapped(encoded: &[u8], width: usize, eol: &[u8]) -> Vec<u8> {
         let chars: Vec<u8> = encoded
             .iter()

@@ -1,31 +1,17 @@
 //! # base64-codec
 //!
-//! Base64 encoding and decoding with the standard alphabet (RFC 4648 4),
-//! lenient as mail needs it, with SIMD, `no_std`, no dependency and no I/O.
+//! Base64 with the standard alphabet (RFC 4648 4), decoded leniently as mail
+//! needs it, with SIMD, `no_std`, no dependency and no I/O.
 //!
-//! A [`Base64Codec`], from [`codec`], holds what every call runs: the backend
-//! a [`Base64Cpu`] token from [`cpu`] names, and the line ending of encoded
-//! output. Its one-shot methods encode a whole input in a pass of their own,
-//! with no carry to keep, and decode it in whole lines and one run when it
-//! ends as usual. [`Base64Encode`] and [`Base64Decode`], from [`encode`] and
-//! [`decode`], take a codec, then the caller's input and output buffers
-//! chunk by chunk, as any I/O-free coroutine does. The library never detects
-//! CPU features itself: the application does it once, builds its codec and
-//! passes it down.
+//! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, which the
+//! application gets once, usually from `Base64Cpu::detect`, and the line
+//! ending of encoded output. Its methods take a whole input, [`Base64Encode`]
+//! and [`Base64Decode`] chunk by chunk.
 //!
-//! The scalar steps are the reference, and the only code that handles
-//! anything but whole quanta of alphabet characters: padding, skipped and
-//! reported bytes, partial quanta and the carry between two calls. Every
-//! backend supplies block kernels, table lookups for scalar and vectors for
-//! SSSE3, AVX2 and AVX-512 on x86 and NEON on aarch64, which one driver,
-//! written once and stamped into each backend under its target features,
-//! runs over runs of whole quanta and over lines of 76 characters, a period
-//! of lines at a time, its blocks crossing the line breaks. Every backend
-//! writes the same bytes and reports the same flag.
-//!
-//! The SIMD kernels follow encodify 1.0.2 and Wojciech Muła and Daniel
-//! Lemire's methods, the driver's structure simdutf8 0.1.5, as
-//! ATTRIBUTION.md details.
+//! The scalar steps alone handle what is not whole quanta: padding, stray
+//! bytes, partial quanta, the carry between calls. Every backend has block
+//! kernels that one driver, stamped into it, runs over runs and lines, all
+//! writing the same bytes; ATTRIBUTION.md credits the methods.
 //!
 //! ```
 //! use base64_codec::{
@@ -33,7 +19,6 @@
 //!     cpu::Base64Cpu,
 //! };
 //!
-//! // NOTE: with the std feature, Base64Cpu::detect() at application start.
 //! let codec = Base64Codec {
 //!     cpu: Base64Cpu::BASELINE,
 //!     wrap: Some(Base64Eol::Crlf),

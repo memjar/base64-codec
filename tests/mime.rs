@@ -1,13 +1,10 @@
-//! base64-codec against the base64 wrapper of mime-rs as of 2026-10-31
-//! (src/codec/base64.rs), which it replaces: the same bytes and the same
-//! clean flag for every input, the same encodings for every input.
+//! Every backend against the base64 wrapper of mime-rs it replaces.
 
 use base64_codec::{
     codec::{Base64Codec, Base64Eol},
     cpu::{Base64Backend, Base64Cpu},
 };
 
-/// The bytes inputs are drawn from, base64 characters most often.
 const POOL: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/AbCd0123+/====\r\n\r\n \t*\x00\x0c\xff-_.";
 
@@ -86,7 +83,6 @@ fn encoding_matches_the_wrapper() {
     }
 }
 
-/// Every token the running CPU supports.
 fn cpus() -> Vec<Base64Cpu> {
     // SAFETY: the scalar backend needs no CPU feature.
     let scalar = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
@@ -122,7 +118,6 @@ fn simd() -> Vec<Base64Cpu> {
     Vec::new()
 }
 
-/// A xorshift generator, so that every run tests the same inputs.
 struct Rng(u64);
 
 impl Rng {
@@ -134,8 +129,7 @@ impl Rng {
     }
 }
 
-/// A frozen copy of mime-rs's src/codec/base64.rs as of 2026-10-31, over the
-/// base64 crate, kept as the oracle of the switch.
+/// mime-rs's src/codec/base64.rs as of 2026-10-31, frozen as the oracle.
 mod wrapper {
     use base64::{
         Engine,
