@@ -3,7 +3,21 @@ name: Audit
 on:
   push:
 
+# NOTE: pimalaya/nix's shared audit workflow requires the CACHIX_AUTH_TOKEN
+# organization secret, which GitHub does not pass to private repositories on
+# the free plan. This copy only pulls from the caches, which needs no token:
+# go back to the shared workflow once this repository is public.
 jobs:
   audit:
-    uses: pimalaya/nix/.github/workflows/audit.yml@master
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v17
+        with:
+          name: soywod
+          extraPullNames: nix-community
+      - uses: Swatinem/rust-cache@v2
+      - run: nix develop -c cargo-deny check
