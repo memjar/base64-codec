@@ -18,6 +18,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - Added lenient decoding with the rules of mime-rs's base64 wrapper: line breaks and blanks skipped, other stray bytes skipped and reported, missing padding accepted, never failing.
 
-- Added `cpu::Base64Cpu`, the backend token a codec holds: `BASELINE` from the build target, `detect` behind the `std` feature, and the unsafe `assume`.
+- Added `cpu::Base64Cpu`, the backend token a codec holds, the widest backend a `simd_cpu::SimdCpu` has the features of.
 
 - Added the scalar, SSSE3, AVX2, AVX-512 VBMI and NEON backends, all writing the same bytes.

@@ -1,6 +1,6 @@
 # 🔣 base64-codec [![Coverage](https://img.shields.io/codecov/c/github/pimalaya/base64-codec/master?style=flat&logo=codecov&logoColor=white)](https://codecov.io/gh/pimalaya/base64-codec) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya) [![Sponsor](https://img.shields.io/badge/sponsor-pink?style=flat&logo=github-sponsors&logoColor=white)](https://pimalaya.org/sponsor/)
 
-Base64 encoder and decoder with SIMD, no_std and dependency-free
+Base64 encoder and decoder with SIMD and no_std
 
 ## Table of contents
 
@@ -22,7 +22,7 @@ Base64 encoder and decoder with SIMD, no_std and dependency-free
 - **MIME lines**: encodes in lines of 76 characters ended by CRLF or LF, or in one unbroken run.
 - **Lenient decoding**: never fails, skips line breaks and blanks, reports other stray bytes.
 - **I/O-free**: encode and decode chunk by chunk into your own buffers.
-- **Portable**: no_std, dependency-free, the CPU picked once by the application.
+- **Portable**: no_std, the CPU features detected once by the application through [simd-cpu](https://github.com/pimalaya/simd-cpu), the only dependency.
 
 > [!TIP]
 > base64-codec uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate optional support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/base64-codec/latest/features).
@@ -49,7 +49,7 @@ The crate ships no examples folder, a whole program adding nothing to a two-call
 
 ## Benchmarks
 
-[criterion](https://crates.io/crates/criterion) medians of `cargo bench --features std --bench compare` on 2026-11-01, on an AMD Ryzen AI Max+ 395 (Zen 5), in GiB/s of raw bytes. Each italic delta compares its row with base64-codec.
+[criterion](https://crates.io/crates/criterion) medians of `cargo bench --bench compare` on 2026-11-01, on an AMD Ryzen AI Max+ 395 (Zen 5), in GiB/s of raw bytes. Each italic delta compares its row with base64-codec.
 
 ### Unwrapped decoding
 

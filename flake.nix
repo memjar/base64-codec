@@ -1,5 +1,5 @@
 {
-  description = "Base64 encoder and decoder with SIMD, no_std and dependency-free, for Rust";
+  description = "Base64 encoder and decoder with SIMD and no_std, for Rust";
 
   inputs = {
     nixpkgs = {

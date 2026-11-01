@@ -6,7 +6,7 @@ status: current
 
 # Calls
 
-How encoding and decoding are called: from one `Base64Codec` value, I/O-free, over the caller's buffers, at once through its one-shot methods or chunk by chunk through the `Base64Encode` and `Base64Decode` built from it, with no dependency and no allocation outside the `alloc` helpers.
+How encoding and decoding are called: from one `Base64Codec` value, I/O-free, over the caller's buffers, at once through its one-shot methods or chunk by chunk through the `Base64Encode` and `Base64Decode` built from it, with simd-cpu as its one dependency and no allocation outside the `alloc` helpers.
 
 ### Requirement: Lengths and short buffers
 
@@ -21,9 +21,9 @@ How encoding and decoding are called: from one `Base64Codec` value, I/O-free, ov
 - WHEN the outputs are joined
 - THEN the bytes are `hihi` and the input is reported unclean
 
-### Requirement: No dependency, no std
+### Requirement: One dependency, no std
 
-The library SHALL build `#![no_std]` with no dependency under every feature combination, `std` serving only `Base64Cpu::detect` and `alloc` only `Base64Codec::encode_vec` and `Base64Codec::decode_vec`.
+The library SHALL build `#![no_std]` under every feature combination with simd-cpu, without its `std` feature, as its only dependency, `alloc` serving only `Base64Codec::encode_vec` and `Base64Codec::decode_vec`.
 
 ### Requirement: One codec for every call
 

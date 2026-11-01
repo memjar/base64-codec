@@ -25,7 +25,7 @@ rustPlatform.buildRustPackage {
   };
 
   meta = {
-    description = "Base64 encoder and decoder with SIMD, no_std and dependency-free";
+    description = "Base64 encoder and decoder with SIMD and no_std";
     homepage = "https://github.com/pimalaya/base64-codec";
     changelog = "https://github.com/pimalaya/base64-codec/blob/master/CHANGELOG.md";
     license = [

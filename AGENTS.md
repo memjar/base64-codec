@@ -38,7 +38,7 @@ Check the structure yourself against the strict rules (CAIRN.md §8): a discover
 
 - Run every cargo command through the nix devshell: `nix develop --command cargo <...>`.
 - Run `cargo fmt` on the crate after finishing code changes.
-- Check the bare core too: `cargo build --no-default-features` must stay dependency-free, with no std leak.
+- Check the bare core too: `cargo build --no-default-features` must depend on simd-cpu alone, without its `std` feature, with no std leak.
 - Never adjust production code to fit a test: adjust the test to match correct behaviour.
 - No em dashes in prose, per the Pimalaya guidelines.
 - Public items carry the `Base64` domain prefix.

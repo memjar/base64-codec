@@ -4,6 +4,8 @@
 //! one-shot methods are in [`encode`](crate::encode) and
 //! [`decode`](crate::decode).
 
+use simd_cpu::SimdCpu;
+
 use crate::cpu::Base64Cpu;
 
 /// The backend and line ending every call runs with, a stateless value the
@@ -22,7 +24,7 @@ pub struct Base64Codec {
 impl Base64Codec {
     /// The build target's backend, unwrapped, needing no detection.
     pub const BASELINE: Self = Self {
-        cpu: Base64Cpu::BASELINE,
+        cpu: Base64Cpu::new(SimdCpu::BASELINE),
         wrap: None,
     };
 

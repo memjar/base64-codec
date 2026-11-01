@@ -2,8 +2,9 @@
 
 use base64_codec::{
     codec::{Base64Codec, Base64Eol},
-    cpu::{Base64Backend, Base64Cpu},
+    cpu::Base64Cpu,
 };
+use simd_cpu::{SimdCpu, SimdFeature};
 
 const POOL: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/AbCd0123+/====\r\n\r\n \t*\x00\x0c\xff-_.";
@@ -84,38 +85,28 @@ fn encoding_matches_the_wrapper() {
 }
 
 fn cpus() -> Vec<Base64Cpu> {
-    // SAFETY: the scalar backend needs no CPU feature.
-    let scalar = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
-    let mut cpus = vec![scalar, Base64Cpu::BASELINE];
-    cpus.extend(simd());
-    cpus
-}
+    let mut cpu = SimdCpu::detect();
+    let mut cpus = vec![
+        Base64Cpu::new(SimdCpu::NONE),
+        Base64Cpu::new(SimdCpu::BASELINE),
+    ];
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn simd() -> Vec<Base64Cpu> {
-    let mut cpus = Vec::new();
+    for feature in [
+        SimdFeature::Avx512Vbmi,
+        SimdFeature::Avx2,
+        SimdFeature::Ssse3,
+        SimdFeature::Neon,
+    ] {
+        let next = Base64Cpu::new(cpu);
 
-    if std::arch::is_x86_feature_detected!("ssse3") {
-        // SAFETY: SSSE3 was detected just above.
-        cpus.push(unsafe { Base64Cpu::assume(Base64Backend::Ssse3) });
-    }
+        if !cpus.contains(&next) {
+            cpus.push(next);
+        }
 
-    if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 was detected just above.
-        cpus.push(unsafe { Base64Cpu::assume(Base64Backend::Avx2) });
-    }
-
-    if std::arch::is_x86_feature_detected!("avx512vbmi") {
-        // SAFETY: AVX-512 VBMI was detected just above.
-        cpus.push(unsafe { Base64Cpu::assume(Base64Backend::Avx512) });
+        cpu = cpu.without(feature);
     }
 
     cpus
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn simd() -> Vec<Base64Cpu> {
-    Vec::new()
 }
 
 struct Rng(u64);

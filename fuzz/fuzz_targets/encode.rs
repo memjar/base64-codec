@@ -5,10 +5,11 @@
 
 use base64_codec::{
     codec::{Base64Codec, Base64Eol},
-    cpu::{Base64Backend, Base64Cpu},
+    cpu::Base64Cpu,
     encode::Base64Encode,
 };
 use libfuzzer_sys::fuzz_target;
+use simd_cpu::{SimdCpu, SimdFeature};
 
 fuzz_target!(|data: &[u8]| {
     let [options, chunk, room, input @ ..] = data else {
@@ -24,8 +25,7 @@ fuzz_target!(|data: &[u8]| {
     let chunk = *chunk as usize + 1;
     let room = *room as usize % 64 + 6;
 
-    // SAFETY: the scalar backend needs no CPU feature.
-    let cpu = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
+    let cpu = Base64Cpu::new(SimdCpu::NONE);
     let scalar = Base64Codec { cpu, wrap };
     let expected = one_shot(input, scalar);
 
@@ -64,28 +64,22 @@ fn one_shot(input: &[u8], codec: Base64Codec) -> Vec<u8> {
 }
 
 fn cpus() -> Vec<Base64Cpu> {
-    let detected = Base64Cpu::detect();
-    let mut cpus = vec![detected];
-    cpus.extend(below(detected.backend()));
+    let mut cpu = SimdCpu::detect();
+    let mut cpus = Vec::new();
+
+    for feature in [
+        SimdFeature::Avx512Vbmi,
+        SimdFeature::Avx2,
+        SimdFeature::Ssse3,
+    ] {
+        let next = Base64Cpu::new(cpu);
+
+        if !cpus.contains(&next) {
+            cpus.push(next);
+        }
+
+        cpu = cpu.without(feature);
+    }
+
     cpus
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn below(detected: Base64Backend) -> Vec<Base64Cpu> {
-    let backends: &[Base64Backend] = match detected {
-        Base64Backend::Avx512 => &[Base64Backend::Avx2, Base64Backend::Ssse3],
-        Base64Backend::Avx2 => &[Base64Backend::Ssse3],
-        _ => &[],
-    };
-
-    // SAFETY: a CPU with AVX-512 has AVX2 and SSSE3, one with AVX2 has SSSE3.
-    backends
-        .iter()
-        .map(|backend| unsafe { Base64Cpu::assume(*backend) })
-        .collect()
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn below(_: Base64Backend) -> Vec<Base64Cpu> {
-    Vec::new()
 }

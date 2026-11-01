@@ -52,6 +52,7 @@ dependencies = [
  "base64-simd",
  "criterion",
  "encodify",
+ "simd-cpu",
 ]
 
 [[package]]
@@ -372,6 +373,11 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "simd-cpu"
+version = "0.0.1"
+source = "git+https://github.com/pimalaya/simd-cpu?rev=4cde2e904ec6edd841215dd5111213325899e11a#4cde2e904ec6edd841215dd5111213325899e11a"
 
 [[package]]
 name = "simdutf8"

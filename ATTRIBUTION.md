@@ -18,7 +18,6 @@ The SSSE3, AVX2 and NEON kernels implement Wojciech Muła and Daniel Lemire, "Fa
 Hans Kratz <hans@appfour.com>, MIT OR Apache-2.0, https://github.com/rusticstuff/simdutf8
 
 - [src/driver.rs](src/driver.rs): the loops written once as a macro and stamped into each backend module under its target features, from src/implementation/algorithm.rs, and the error of several blocks joined into one vector and tested once.
-- [src/cpu.rs](src/cpu.rs): the backend picked from the build's target features when nothing is detected, from src/implementation/x86/mod.rs.
 
 ## Scalar tables
 

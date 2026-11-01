@@ -6,10 +6,11 @@ use std::{hint::black_box, time::Duration};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use base64_codec::{
     codec::{Base64Codec, Base64Eol},
-    cpu::{Base64Backend, Base64Cpu},
+    cpu::Base64Cpu,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use encodify::base64::{MIME as ENCODIFY_MIME, STANDARD as ENCODIFY};
+use simd_cpu::{SimdCpu, SimdFeature};
 
 const SIZES: [usize; 4] = [64, 4 * 1024, 1024 * 1024, 10 * 1024 * 1024];
 
@@ -30,32 +31,18 @@ fn input(len: usize) -> Vec<u8> {
 }
 
 fn cpus() -> Vec<(&'static str, Base64Cpu)> {
-    // SAFETY: the scalar backend needs no CPU feature.
-    let scalar = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
+    let detected = SimdCpu::detect();
     let mut cpus = vec![
-        ("base64-codec", Base64Cpu::detect()),
-        ("base64-codec scalar", scalar),
+        ("base64-codec", Base64Cpu::new(detected)),
+        ("base64-codec scalar", Base64Cpu::new(SimdCpu::NONE)),
     ];
 
-    cpus.extend(avx2());
+    if detected.has(SimdFeature::Avx512Vbmi) {
+        let avx2 = detected.without(SimdFeature::Avx512Vbmi);
+        cpus.push(("base64-codec avx2", Base64Cpu::new(avx2)));
+    }
+
     cpus
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn avx2() -> Option<(&'static str, Base64Cpu)> {
-    let avx512 = Base64Cpu::detect().backend() == Base64Backend::Avx512;
-
-    // SAFETY: a CPU with AVX-512 VBMI has AVX2.
-    avx512.then(|| {
-        ("base64-codec avx2", unsafe {
-            Base64Cpu::assume(Base64Backend::Avx2)
-        })
-    })
-}
-
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn avx2() -> Option<(&'static str, Base64Cpu)> {
-    None
 }
 
 fn encodes(c: &mut Criterion) {

@@ -1,12 +1,12 @@
 //! # base64-codec
 //!
 //! Base64 with the standard alphabet (RFC 4648 4), decoded leniently as mail
-//! needs it, with SIMD, `no_std`, no dependency and no I/O.
+//! needs it, with SIMD, `no_std` and no I/O.
 //!
-//! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, which the
-//! application gets once, usually from `Base64Cpu::detect`, and the line
-//! ending of encoded output. Its methods take a whole input, [`Base64Encode`]
-//! and [`Base64Decode`] chunk by chunk.
+//! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, picked from the
+//! `simd_cpu::SimdCpu` the application gets once, usually from
+//! `SimdCpu::detect`, and the line ending of encoded output. Its methods take
+//! a whole input, [`Base64Encode`] and [`Base64Decode`] chunk by chunk.
 //!
 //! The scalar steps alone handle what is not whole quanta: padding, stray
 //! bytes, partial quanta, the carry between calls. Every backend has block
@@ -18,9 +18,10 @@
 //!     codec::{Base64Codec, Base64Eol},
 //!     cpu::Base64Cpu,
 //! };
+//! use simd_cpu::SimdCpu;
 //!
 //! let codec = Base64Codec {
-//!     cpu: Base64Cpu::BASELINE,
+//!     cpu: Base64Cpu::new(SimdCpu::BASELINE),
 //!     wrap: Some(Base64Eol::Crlf),
 //! };
 //!
@@ -45,7 +46,7 @@
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
-#[cfg(any(feature = "std", test))]
+#[cfg(test)]
 extern crate std;
 
 #[macro_use]

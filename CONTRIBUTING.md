@@ -29,7 +29,7 @@ Non-trivial work starts with a change folder under cairn/changes, and nothing be
 
 ## Build
 
-The crate is no_std and dependency-free under every feature: `alloc` adds the Vec helpers, `std` adds CPU detection. The tests run every backend the machine has against the scalar steps:
+The crate is no_std under every feature, with simd-cpu as its one dependency, built without its `std` feature: `alloc` adds the Vec helpers, and the tests and the bench detect the CPU through simd-cpu. The tests run every backend the machine has against the scalar steps:
 
 ```sh
 cargo build --no-default-features
@@ -41,7 +41,7 @@ The NEON backend builds for aarch64 and runs under qemu, with `QEMU_CPU=neoverse
 
 ## Benchmarks
 
-The comparative benchmark runs with cargo bench --features std --bench compare, and its numbers and history are in [benches/README.md](./benches/README.md).
+The comparative benchmark runs with cargo bench --bench compare, and its numbers and history are in [benches/README.md](./benches/README.md).
 
 Criterion moves by several percent between runs, so speed work is measured in cycles per call, by the method of the latest change under cairn/changes.
 
