@@ -3,14 +3,15 @@
 //! Base64 encoding and decoding with the standard alphabet (RFC 4648 4),
 //! lenient as mail needs it, with SIMD, `no_std`, no dependency and no I/O.
 //!
-//! [`encode`] and [`decode`] hold the API: [`Base64Encode`] and
-//! [`Base64Decode`] take the caller's input and output buffers chunk by
-//! chunk, as any I/O-free coroutine does; the one-shot functions decode a
-//! whole input in whole lines and one run when it ends as usual, and encode
-//! it in a pass of their own, with no carry to keep. Every call runs the
-//! backend a [`Base64Cpu`] token from [`cpu`] names: the library never
-//! detects CPU features itself, the application does it once and passes the
-//! token down.
+//! A [`Base64Codec`], from [`codec`], holds what every call runs: the backend
+//! a [`Base64Cpu`] token from [`cpu`] names, and the line ending of encoded
+//! output. Its one-shot methods encode a whole input in a pass of their own,
+//! with no carry to keep, and decode it in whole lines and one run when it
+//! ends as usual. [`Base64Encode`] and [`Base64Decode`], from [`encode`] and
+//! [`decode`], take a codec, then the caller's input and output buffers
+//! chunk by chunk, as any I/O-free coroutine does. The library never detects
+//! CPU features itself: the application does it once, builds its codec and
+//! passes it down.
 //!
 //! The scalar steps are the reference, and the only code that handles
 //! anything but whole quanta of alphabet characters: padding, skipped and
@@ -28,28 +29,27 @@
 //!
 //! ```
 //! use base64_codec::{
+//!     codec::{Base64Codec, Base64Eol},
 //!     cpu::Base64Cpu,
-//!     decode::decode,
-//!     encode::{Base64EncodeOptions, Base64Eol, encode},
 //! };
 //!
 //! // NOTE: with the std feature, Base64Cpu::detect() at application start.
-//! let cpu = Base64Cpu::BASELINE;
-//!
-//! let opts = Base64EncodeOptions {
+//! let codec = Base64Codec {
+//!     cpu: Base64Cpu::BASELINE,
 //!     wrap: Some(Base64Eol::Crlf),
 //! };
 //!
 //! let mut encoded = [0; 6];
-//! let len = encode(b"hi!", &mut encoded, cpu, opts).unwrap();
+//! let len = codec.encode(b"hi!", &mut encoded).unwrap();
 //! assert_eq!(&encoded[..len], b"aGkh\r\n");
 //!
 //! let mut decoded = [0; 6];
-//! let output = decode(b"aGkh\r\n", &mut decoded, cpu).unwrap();
+//! let output = codec.decode(b"aGkh\r\n", &mut decoded).unwrap();
 //! assert_eq!(&decoded[..output.written], b"hi!");
 //! assert!(output.clean);
 //! ```
 //!
+//! [`Base64Codec`]: codec::Base64Codec
 //! [`Base64Encode`]: encode::Base64Encode
 //! [`Base64Decode`]: decode::Base64Decode
 //! [`Base64Cpu`]: cpu::Base64Cpu
@@ -70,6 +70,7 @@ mod driver;
 mod avx2;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod avx512;
+pub mod codec;
 pub mod cpu;
 pub mod decode;
 pub mod encode;

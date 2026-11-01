@@ -4,9 +4,10 @@
 //! needs) or in lines of 76 characters, each ended by CRLF or LF, the last
 //! one included (as a MIME body needs).
 //!
-//! [`Base64Encode`] takes the input chunk by chunk; [`encode`] and
-//! `encode_vec` encode a whole input in one pass, with no carry to keep.
-//! Decoding is the sibling module [`decode`](crate::decode).
+//! [`Base64Encode`] takes the input chunk by chunk; the one-shot
+//! [`Base64Codec::encode`] and `Base64Codec::encode_vec` encode a whole input
+//! in one pass, with no carry to keep. Decoding is the sibling module
+//! [`decode`](crate::decode).
 
 use core::mem::MaybeUninit;
 
@@ -14,6 +15,7 @@ use core::mem::MaybeUninit;
 use alloc::vec::Vec;
 
 use crate::{
+    codec::Base64Codec,
     cpu::Base64Cpu,
     driver,
     scalar::{self, EncodeState, LINE, LINE_BYTES},
@@ -27,15 +29,16 @@ use crate::{
 ///
 /// ```
 /// use base64_codec::{
-///     cpu::Base64Cpu,
-///     encode::{Base64Encode, Base64EncodeOptions, Base64Eol},
+///     codec::{Base64Codec, Base64Eol},
+///     encode::Base64Encode,
 /// };
 ///
-/// let opts = Base64EncodeOptions {
+/// let codec = Base64Codec {
 ///     wrap: Some(Base64Eol::Crlf),
+///     ..Base64Codec::BASELINE
 /// };
 ///
-/// let mut encoder = Base64Encode::new(Base64Cpu::BASELINE, opts);
+/// let mut encoder = Base64Encode::new(codec);
 /// let mut out = [0; 16];
 ///
 /// let first = encoder.resume(b"hel", &mut out);
@@ -54,11 +57,11 @@ pub struct Base64Encode {
 }
 
 impl Base64Encode {
-    /// Builds an encoder running the backend `cpu` names.
-    pub fn new(cpu: Base64Cpu, opts: Base64EncodeOptions) -> Self {
+    /// Builds an encoder running the backend and the line ending of `codec`.
+    pub fn new(codec: Base64Codec) -> Self {
         Self {
-            cpu,
-            state: EncodeState::new(opts.eol()),
+            cpu: codec.cpu,
+            state: EncodeState::new(codec.eol()),
         }
     }
 
@@ -115,35 +118,6 @@ impl Base64Encode {
     }
 }
 
-/// Options of [`Base64Encode`] and [`encode`].
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Base64EncodeOptions {
-    /// The line ending of 76-character lines, or none for a single
-    /// unbroken run. Defaults to none.
-    ///
-    /// Refs: <https://datatracker.ietf.org/doc/html/rfc2045#section-6.8>
-    pub wrap: Option<Base64Eol>,
-}
-
-impl Base64EncodeOptions {
-    fn eol(self) -> &'static [u8] {
-        match self.wrap {
-            None => b"",
-            Some(Base64Eol::Crlf) => b"\r\n",
-            Some(Base64Eol::Lf) => b"\n",
-        }
-    }
-}
-
-/// The line ending of wrapped output.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Base64Eol {
-    /// CR LF, as the wire format of mail has it.
-    Crlf,
-    /// LF alone, as mail stored on disk often has it.
-    Lf,
-}
-
 /// What an encoding call did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Base64EncodeOutput {
@@ -153,96 +127,90 @@ pub struct Base64EncodeOutput {
     pub written: usize,
 }
 
-/// Encodes the whole of `src` into `dst`, returning the bytes written.
-///
-/// Returns none, writing nothing, when `dst` is shorter than
-/// [`encoded_len`] asks.
-pub fn encode(
-    src: &[u8],
-    dst: &mut [u8],
-    cpu: Base64Cpu,
-    opts: Base64EncodeOptions,
-) -> Option<usize> {
-    let len = encoded_len(src.len(), opts)?;
-    let dst = dst.get_mut(..len)?;
-    Some(encode_all(src, driver::uninit(dst), cpu, opts))
-}
-
-/// Encodes the whole of `src` at the end of `out`.
-#[cfg(feature = "alloc")]
-#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
-pub fn encode_vec(src: &[u8], out: &mut Vec<u8>, cpu: Base64Cpu, opts: Base64EncodeOptions) {
-    let start = out.len();
-    out.reserve(encoded_len(src.len(), opts).unwrap_or(usize::MAX));
-
-    let written = encode_all(src, out.spare_capacity_mut(), cpu, opts);
-
-    // SAFETY: the encoder initialised the first `written` bytes.
-    unsafe { out.set_len(start + written) };
-}
-
-/// The bytes [`encode`] writes for an input of `len` bytes, or none when
-/// that overflows `usize`.
-pub fn encoded_len(len: usize, opts: Base64EncodeOptions) -> Option<usize> {
-    let chars = len.div_ceil(3).checked_mul(4)?;
-    let lines = chars.div_ceil(LINE);
-    chars.checked_add(lines.checked_mul(opts.eol().len())?)
-}
-
-/// [`encode`] into a `dst` sized by [`encoded_len`], with no [`Base64Encode`]
-/// state: one run and the padded tail when unwrapped, else whole lines first
-/// and the last line ending after the tail.
-fn encode_all(
-    src: &[u8],
-    dst: &mut [MaybeUninit<u8>],
-    cpu: Base64Cpu,
-    opts: Base64EncodeOptions,
-) -> usize {
-    let loops = cpu.loops();
-    let eol = opts.eol();
-
-    if eol.is_empty() {
-        // SAFETY: the token names a backend the CPU supports.
-        let bytes = unsafe { (loops.encode_run)(src, dst) };
-        let written = bytes / 3 * 4;
-        return written + scalar::encode_tail(&src[bytes..], &mut dst[written..]);
+/// One-shot encoding.
+impl Base64Codec {
+    /// Encodes the whole of `src` into `dst`, returning the bytes written.
+    ///
+    /// Returns none, writing nothing, when `dst` is shorter than
+    /// [`encoded_len`](Self::encoded_len) asks.
+    #[inline]
+    pub fn encode(self, src: &[u8], dst: &mut [u8]) -> Option<usize> {
+        let len = self.encoded_len(src.len())?;
+        let dst = dst.get_mut(..len)?;
+        Some(self.encode_all(src, driver::uninit(dst)))
     }
 
-    // SAFETY: as above.
-    let lines = unsafe { (loops.encode_lines[eol.len() - 1])(src, dst) };
-    let read = lines * LINE_BYTES;
-    let start = lines * (LINE + eol.len());
+    /// Encodes the whole of `src` at the end of `out`.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    pub fn encode_vec(self, src: &[u8], out: &mut Vec<u8>) {
+        let start = out.len();
+        out.reserve(self.encoded_len(src.len()).unwrap_or(usize::MAX));
 
-    // SAFETY: as above.
-    let bytes = unsafe { (loops.encode_run)(&src[read..], &mut dst[start..]) };
-    let mut written = start + bytes / 3 * 4;
-    written += scalar::encode_tail(&src[read + bytes..], &mut dst[written..]);
+        let written = self.encode_all(src, out.spare_capacity_mut());
 
-    if written == start {
-        return written;
+        // SAFETY: the encoder initialised the first `written` bytes.
+        unsafe { out.set_len(start + written) };
     }
 
-    scalar::write_eol(&mut dst[written..], eol);
-    written + eol.len()
+    /// The bytes [`encode`](Self::encode) writes for an input of `len` bytes,
+    /// or none when that overflows `usize`.
+    pub fn encoded_len(self, len: usize) -> Option<usize> {
+        let chars = len.div_ceil(3).checked_mul(4)?;
+        let lines = chars.div_ceil(LINE);
+        chars.checked_add(lines.checked_mul(self.eol().len())?)
+    }
+
+    /// [`encode`](Self::encode) into a `dst` sized by
+    /// [`encoded_len`](Self::encoded_len), with no [`Base64Encode`] state:
+    /// one run and the padded tail when unwrapped, else whole lines first and
+    /// the last line ending after the tail.
+    fn encode_all(self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
+        let loops = self.cpu.loops();
+        let eol = self.eol();
+
+        if eol.is_empty() {
+            // SAFETY: the token names a backend the CPU supports.
+            let bytes = unsafe { (loops.encode_run)(src, dst) };
+            let written = bytes / 3 * 4;
+            return written + scalar::encode_tail(&src[bytes..], &mut dst[written..]);
+        }
+
+        // SAFETY: as above.
+        let lines = unsafe { (loops.encode_lines[eol.len() - 1])(src, dst) };
+        let read = lines * LINE_BYTES;
+        let start = lines * (LINE + eol.len());
+
+        // SAFETY: as above.
+        let bytes = unsafe { (loops.encode_run)(&src[read..], &mut dst[start..]) };
+        let mut written = start + bytes / 3 * 4;
+        written += scalar::encode_tail(&src[read + bytes..], &mut dst[written..]);
+
+        if written == start {
+            return written;
+        }
+
+        scalar::write_eol(&mut dst[written..], eol);
+        written + eol.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use crate::{cpu::available, encode::*};
+    use crate::{codec::Base64Eol, cpu::available, encode::*};
 
-    const CRLF: Base64EncodeOptions = Base64EncodeOptions {
-        wrap: Some(Base64Eol::Crlf),
-    };
+    const CRLF: Option<Base64Eol> = Some(Base64Eol::Crlf);
 
     /// What every backend encodes `input` to, checked equal.
-    fn encoded(input: &[u8], opts: Base64EncodeOptions) -> Vec<u8> {
+    fn encoded(input: &[u8], wrap: Option<Base64Eol>) -> Vec<u8> {
         let results: Vec<Vec<u8>> = available()
             .into_iter()
             .map(|cpu| {
-                let mut out = vec![0; encoded_len(input.len(), opts).unwrap()];
-                let written = encode(input, &mut out, cpu, opts).unwrap();
+                let codec = Base64Codec { cpu, wrap };
+                let mut out = vec![0; codec.encoded_len(input.len()).unwrap()];
+                let written = codec.encode(input, &mut out).unwrap();
                 assert_eq!(written, out.len());
                 out
             })
@@ -263,10 +231,7 @@ mod tests {
             (b"fooba", b"Zm9vYmE="),
             (b"foobar", b"Zm9vYmFy"),
         ] {
-            assert_eq!(
-                encoded(decoded, Base64EncodeOptions::default()),
-                encoded_chars
-            );
+            assert_eq!(encoded(decoded, None), encoded_chars);
         }
     }
 
@@ -288,11 +253,14 @@ mod tests {
 
     #[test]
     fn an_overflowing_length_is_none() {
-        assert_eq!(
-            encoded_len(usize::MAX, Base64EncodeOptions::default()),
-            None
-        );
-        assert_eq!(encoded_len(usize::MAX / 4 * 3, CRLF), None);
+        let codec = Base64Codec::BASELINE;
+        assert_eq!(codec.encoded_len(usize::MAX), None);
+
+        let codec = Base64Codec {
+            wrap: CRLF,
+            ..codec
+        };
+        assert_eq!(codec.encoded_len(usize::MAX / 4 * 3), None);
     }
 
     #[test]
@@ -300,7 +268,7 @@ mod tests {
         let input: Vec<u8> = (0..200).collect();
 
         for cpu in available() {
-            let mut encoder = Base64Encode::new(cpu, CRLF);
+            let mut encoder = Base64Encode::new(Base64Codec { cpu, wrap: CRLF });
             let mut src = &input[..];
             let mut out = Vec::new();
             let mut room = [0; 6];
@@ -320,8 +288,13 @@ mod tests {
 
     #[test]
     fn a_short_buffer_writes_nothing() {
+        let codec = Base64Codec {
+            wrap: CRLF,
+            ..Base64Codec::BASELINE
+        };
+
         let mut out = [0xaa; 3];
-        assert_eq!(encode(b"f", &mut out, Base64Cpu::BASELINE, CRLF), None);
+        assert_eq!(codec.encode(b"f", &mut out), None);
         assert_eq!(out, [0xaa; 3]);
     }
 
@@ -332,7 +305,7 @@ mod tests {
 
         for cpu in available() {
             let mut out = b"> ".to_vec();
-            encode_vec(&input, &mut out, cpu, CRLF);
+            Base64Codec { cpu, wrap: CRLF }.encode_vec(&input, &mut out);
             assert_eq!(&out[..2], b"> ");
             assert_eq!(out[2..], encoded(&input, CRLF));
         }

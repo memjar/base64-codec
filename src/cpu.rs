@@ -2,8 +2,9 @@
 //!
 //! [`Base64Cpu`] names the backend every encoding and decoding call runs.
 //! The library never detects CPU features itself: the application does it
-//! once, with `Base64Cpu::detect` or by its own means, and passes the token
-//! down, while [`Base64Cpu::BASELINE`] needs no detection at all.
+//! once, with `Base64Cpu::detect` or by its own means, and builds its
+//! [`Base64Codec`](crate::codec::Base64Codec) with the token, while
+//! [`Base64Cpu::BASELINE`] needs no detection at all.
 
 use crate::driver::Loops;
 
@@ -42,8 +43,8 @@ impl Base64Cpu {
 
     /// The best backend the running CPU supports, detected at run time.
     ///
-    /// Meant to be called once by the application, which then passes the
-    /// token down to every call.
+    /// Meant to be called once by the application, which then builds its
+    /// codec with the token.
     #[cfg(feature = "std")]
     #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
     pub fn detect() -> Self {

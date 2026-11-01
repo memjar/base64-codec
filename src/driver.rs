@@ -508,22 +508,15 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use crate::{
-        cpu::{Base64Cpu, available},
-        decode::{Base64Decode, decode, decoded_len_max},
+        codec::{Base64Codec, Base64Eol},
+        cpu::available,
+        decode::Base64Decode,
         driver::uninit,
-        encode::{Base64Encode, Base64EncodeOptions, Base64Eol, encode, encoded_len},
+        encode::Base64Encode,
         scalar::{self, DecodeState, EncodeState},
     };
 
-    const OPTIONS: [Base64EncodeOptions; 3] = [
-        Base64EncodeOptions { wrap: None },
-        Base64EncodeOptions {
-            wrap: Some(Base64Eol::Crlf),
-        },
-        Base64EncodeOptions {
-            wrap: Some(Base64Eol::Lf),
-        },
-    ];
+    const WRAPS: [Option<Base64Eol>; 3] = [None, Some(Base64Eol::Crlf), Some(Base64Eol::Lf)];
 
     /// A xorshift generator, so that every run tests the same inputs.
     struct Rng(u64);
@@ -544,7 +537,7 @@ mod tests {
     /// Decoding through the scalar steps alone, byte by byte.
     fn reference_decode(src: &[u8]) -> (Vec<u8>, bool) {
         let mut state = DecodeState::new();
-        let mut out = vec![0; decoded_len_max(src.len())];
+        let mut out = vec![0; Base64Codec::BASELINE.decoded_len_max(src.len())];
         let (mut read, mut written) = (0, 0);
 
         loop {
@@ -565,33 +558,39 @@ mod tests {
     }
 
     /// Encoding through the scalar steps alone, group by group.
-    fn reference_encode(src: &[u8], opts: Base64EncodeOptions) -> Vec<u8> {
-        let eol: &'static [u8] = match opts.wrap {
+    fn reference_encode(src: &[u8], wrap: Option<Base64Eol>) -> Vec<u8> {
+        let eol: &'static [u8] = match wrap {
             None => b"",
             Some(Base64Eol::Crlf) => b"\r\n",
             Some(Base64Eol::Lf) => b"\n",
         };
 
+        let codec = Base64Codec {
+            wrap,
+            ..Base64Codec::BASELINE
+        };
+
         let mut state = EncodeState::new(eol);
-        let mut out = vec![0; encoded_len(src.len(), opts).unwrap()];
+        let mut out = vec![0; codec.encoded_len(src.len()).unwrap()];
         let (_, written) = scalar::encode_bytes(&mut state, src, uninit(&mut out));
         let end = scalar::encode_finish(&mut state, uninit(&mut out[written..])).unwrap();
         out.truncate(written + end);
         out
     }
 
-    fn one_shot_decode(src: &[u8], cpu: Base64Cpu) -> (Vec<u8>, bool) {
-        let mut out = vec![0; decoded_len_max(src.len())];
-        let output = decode(src, &mut out, cpu).unwrap();
+    fn one_shot_decode(src: &[u8], codec: Base64Codec) -> (Vec<u8>, bool) {
+        let mut out = vec![0; codec.decoded_len_max(src.len())];
+        let output = codec.decode(src, &mut out).unwrap();
         assert_eq!(output.read, src.len());
         out.truncate(output.written);
         (out, output.clean)
     }
 
-    fn one_shot_encode(src: &[u8], cpu: Base64Cpu, opts: Base64EncodeOptions) -> Vec<u8> {
-        let mut out = vec![0; encoded_len(src.len(), opts).unwrap()];
-        let written = encode(src, &mut out, cpu, opts).unwrap();
-        out.truncate(written);
+    /// The one-shot encoding, checked to write the length it asks.
+    fn one_shot_encode(src: &[u8], codec: Base64Codec) -> Vec<u8> {
+        let mut out = vec![0; codec.encoded_len(src.len()).unwrap()];
+        let written = codec.encode(src, &mut out).unwrap();
+        assert_eq!(written, out.len());
         out
     }
 
@@ -621,9 +620,8 @@ mod tests {
         for len in 0..=1024 {
             let input = rng.bytes(len);
 
-            for opts in OPTIONS {
-                let expected = reference_encode(&input, opts);
-                assert_eq!(expected.len(), encoded_len(len, opts).unwrap());
+            for wrap in WRAPS {
+                let expected = reference_encode(&input, wrap);
                 assert_eq!(reference_decode(&expected), (input.clone(), true));
 
                 let mut variants = vec![
@@ -641,17 +639,14 @@ mod tests {
                 }
 
                 for cpu in available() {
-                    assert_eq!(
-                        one_shot_encode(&input, cpu, opts),
-                        expected,
-                        "{cpu:?} {opts:?} {len}"
-                    );
+                    let codec = Base64Codec { cpu, wrap };
+                    assert_eq!(one_shot_encode(&input, codec), expected, "{codec:?} {len}");
 
                     for variant in &variants {
                         assert_eq!(
-                            one_shot_decode(variant, cpu),
+                            one_shot_decode(variant, codec),
                             reference_decode(variant),
-                            "{cpu:?} {opts:?} {len}"
+                            "{codec:?} {len}"
                         );
                     }
                 }
@@ -662,8 +657,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_byte_at_every_position_matches_the_reference() {
-        let run = reference_encode(&Rng(7).bytes(120), OPTIONS[0]);
-        let lines = reference_encode(&Rng(7).bytes(171), OPTIONS[1]);
+        let run = reference_encode(&Rng(7).bytes(120), None);
+        let lines = reference_encode(&Rng(7).bytes(171), Some(Base64Eol::Crlf));
 
         for line in [run, lines] {
             for byte in 0..=255 {
@@ -673,8 +668,9 @@ mod tests {
                     let expected = reference_decode(&input);
 
                     for cpu in available() {
+                        let codec = Base64Codec { cpu, wrap: None };
                         assert_eq!(
-                            one_shot_decode(&input, cpu),
+                            one_shot_decode(&input, codec),
                             expected,
                             "{cpu:?} {byte} {at}"
                         );
@@ -704,10 +700,15 @@ mod tests {
                     let expected = reference_decode(&input);
 
                     for cpu in available() {
-                        assert_eq!(one_shot_decode(&input, cpu), expected, "{cpu:?} {input:?}");
+                        let codec = Base64Codec { cpu, wrap: None };
+                        assert_eq!(
+                            one_shot_decode(&input, codec),
+                            expected,
+                            "{cpu:?} {input:?}"
+                        );
 
-                        let mut decoder = Base64Decode::new(cpu);
-                        let mut out = vec![0; decoded_len_max(input.len())];
+                        let mut decoder = Base64Decode::new(codec);
+                        let mut out = vec![0; codec.decoded_len_max(input.len())];
                         let first = decoder.resume(prefix, &mut out);
                         let second = decoder.resume(&end, &mut out[first.written..]);
                         let written = first.written + second.written;
@@ -726,36 +727,38 @@ mod tests {
         let mut rng = Rng(42);
         let input = rng.bytes(300);
 
-        for opts in OPTIONS {
-            let encoded = reference_encode(&input, opts);
+        for wrap in WRAPS {
+            let encoded = reference_encode(&input, wrap);
             let mut dirty = encoded.clone();
             dirty.insert(100, b'*');
             dirty.extend_from_slice(b"=Zg");
 
             for cpu in available() {
+                let codec = Base64Codec { cpu, wrap };
+
                 for at in 0..=input.len() {
-                    let mut encoder = Base64Encode::new(cpu, opts);
+                    let mut encoder = Base64Encode::new(codec);
                     let mut out = vec![0; encoded.len()];
                     let first = encoder.resume(&input[..at], &mut out);
                     let second = encoder.resume(&input[at..], &mut out[first.written..]);
                     let written = first.written + second.written;
                     let end = encoder.finish(&mut out[written..]).unwrap();
-                    assert_eq!(written + end, encoded.len(), "{cpu:?} {opts:?} {at}");
-                    assert_eq!(out, encoded, "{cpu:?} {opts:?} {at}");
+                    assert_eq!(written + end, encoded.len(), "{codec:?} {at}");
+                    assert_eq!(out, encoded, "{codec:?} {at}");
                 }
 
                 for source in [&encoded, &dirty] {
                     let expected = reference_decode(source);
 
                     for at in 0..=source.len() {
-                        let mut decoder = Base64Decode::new(cpu);
-                        let mut out = vec![0; decoded_len_max(source.len())];
+                        let mut decoder = Base64Decode::new(codec);
+                        let mut out = vec![0; codec.decoded_len_max(source.len())];
                         let first = decoder.resume(&source[..at], &mut out);
                         let second = decoder.resume(&source[at..], &mut out[first.written..]);
                         let written = first.written + second.written;
                         let end = decoder.finish(&mut out[written..]).unwrap();
                         out.truncate(written + end.written);
-                        assert_eq!((out, end.clean), expected, "{cpu:?} {opts:?} {at}");
+                        assert_eq!((out, end.clean), expected, "{codec:?} {at}");
                     }
                 }
             }

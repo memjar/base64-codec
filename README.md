@@ -41,7 +41,7 @@ Base64 encoder and decoder with SIMD, no_std and dependency-free
 
 ## Usage
 
-The whole API is documented on [docs.rs](https://docs.rs/base64-codec/latest/base64_codec), with runnable snippets for the encoder, the decoder and the one-shot functions.
+The whole API is documented on [docs.rs](https://docs.rs/base64-codec/latest/base64_codec), with runnable snippets for the codec and its one-shot methods, the encoder and the decoder.
 
 ## Examples
 

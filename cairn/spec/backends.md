@@ -6,7 +6,7 @@ status: current
 
 # Backends
 
-Every call runs the backend a `Base64Cpu` token names: scalar everywhere, SSSE3, AVX2 and AVX-512 on x86, NEON on aarch64. The scalar steps alone handle anything but whole quanta of alphabet characters; the SIMD backends supply block kernels that one shared driver runs, and hand everything else back to scalar.
+Every call runs the backend the `Base64Cpu` token of its codec names: scalar everywhere, SSSE3, AVX2 and AVX-512 on x86, NEON on aarch64. The scalar steps alone handle anything but whole quanta of alphabet characters; the SIMD backends supply block kernels that one shared driver runs, and hand everything else back to scalar.
 
 ### Requirement: CPU detection is the caller's
 
@@ -14,12 +14,12 @@ No encoding or decoding function SHALL detect CPU features. A backend SHALL run 
 
 #### Scenario: An aarch64 build without std
 - GIVEN the crate built for aarch64 with no feature
-- WHEN `decode` runs with `Base64Cpu::BASELINE`
+- WHEN `Base64Codec::BASELINE` decodes an input
 - THEN it runs the NEON backend, and no detection code is compiled
 
 #### Scenario: A default x86_64 build without std
 - GIVEN the crate built for x86_64 with no feature and no `-C target-feature`
-- WHEN `decode` runs with `Base64Cpu::BASELINE`
+- WHEN `Base64Codec::BASELINE` decodes an input
 - THEN it runs the scalar backend
 
 ### Requirement: The widest backend the CPU has
@@ -33,7 +33,7 @@ No encoding or decoding function SHALL detect CPU features. A backend SHALL run 
 
 ### Requirement: Every backend matches scalar
 
-For every input and options, every backend SHALL write the same bytes and return the same clean flag as the scalar steps, in one-shot and resumed calls alike.
+For every input and line ending, every backend SHALL write the same bytes and return the same clean flag as the scalar steps, in one-shot and resumed calls alike.
 
 #### Scenario: Every length on an AVX-512 machine
 - GIVEN pseudo-random inputs of every length from 0 to 1,024, encoded unwrapped, with CRLF and with LF, and the same encodings rewrapped or with a stray byte inserted

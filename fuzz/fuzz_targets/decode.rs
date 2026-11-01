@@ -5,8 +5,9 @@
 #![no_main]
 
 use base64_codec::{
+    codec::Base64Codec,
     cpu::{Base64Backend, Base64Cpu},
-    decode::{Base64Decode, decode, decoded_len_max},
+    decode::Base64Decode,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -20,12 +21,19 @@ fuzz_target!(|data: &[u8]| {
 
     // SAFETY: the scalar backend needs no CPU feature.
     let scalar = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
-    let expected = one_shot(input, scalar);
+    let expected = one_shot(
+        input,
+        Base64Codec {
+            cpu: scalar,
+            wrap: None,
+        },
+    );
 
     for cpu in cpus() {
-        assert_eq!(one_shot(input, cpu), expected, "{cpu:?}");
+        let codec = Base64Codec { cpu, wrap: None };
+        assert_eq!(one_shot(input, codec), expected, "{cpu:?}");
 
-        let mut decoder = Base64Decode::new(cpu);
+        let mut decoder = Base64Decode::new(codec);
         let mut out = Vec::new();
         let mut buffer = vec![0; room];
 
@@ -43,9 +51,9 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-fn one_shot(input: &[u8], cpu: Base64Cpu) -> (Vec<u8>, bool) {
-    let mut out = vec![0; decoded_len_max(input.len())];
-    let output = decode(input, &mut out, cpu).unwrap();
+fn one_shot(input: &[u8], codec: Base64Codec) -> (Vec<u8>, bool) {
+    let mut out = vec![0; codec.decoded_len_max(input.len())];
+    let output = codec.decode(input, &mut out).unwrap();
     out.truncate(output.written);
     (out, output.clean)
 }

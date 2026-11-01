@@ -7,20 +7,16 @@ use std::{hint::black_box, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use base64_codec::{
+    codec::{Base64Codec, Base64Eol},
     cpu::{Base64Backend, Base64Cpu},
-    decode::decode,
-    encode::{Base64EncodeOptions, Base64Eol, encode, encoded_len},
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use encodify::base64::{MIME as ENCODIFY_MIME, STANDARD as ENCODIFY};
 
 const SIZES: [usize; 4] = [64, 4 * 1024, 1024 * 1024, 10 * 1024 * 1024];
 
-const UNWRAPPED: Base64EncodeOptions = Base64EncodeOptions { wrap: None };
-
-const WRAPPED: Base64EncodeOptions = Base64EncodeOptions {
-    wrap: Some(Base64Eol::Crlf),
-};
+const WRAPS: [(&str, Option<Base64Eol>); 2] =
+    [("unwrapped", None), ("wrapped", Some(Base64Eol::Crlf))];
 
 fn input(len: usize) -> Vec<u8> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
@@ -67,23 +63,30 @@ fn avx2() -> Option<(&'static str, Base64Cpu)> {
 }
 
 fn encodes(c: &mut Criterion) {
-    for (name, opts) in [("unwrapped", UNWRAPPED), ("wrapped", WRAPPED)] {
+    for (name, wrap) in WRAPS {
+        let baseline = Base64Codec {
+            wrap,
+            ..Base64Codec::BASELINE
+        };
+
         let mut group = c.benchmark_group(format!("encode {name}"));
         group.warm_up_time(Duration::from_secs(1));
         group.measurement_time(Duration::from_secs(3));
 
         for size in SIZES {
             let src = input(size);
-            let mut out = vec![0; encoded_len(size, opts).unwrap() + 64];
+            let mut out = vec![0; baseline.encoded_len(size).unwrap() + 64];
             group.throughput(Throughput::Bytes(size as u64));
 
             for (label, cpu) in cpus() {
+                let codec = Base64Codec { cpu, wrap };
+
                 group.bench_with_input(BenchmarkId::new(label, size), &src, |b, src| {
-                    b.iter(|| encode(black_box(src), &mut out, cpu, opts))
+                    b.iter(|| codec.encode(black_box(src), &mut out))
                 });
             }
 
-            match opts.wrap {
+            match wrap {
                 None => {
                     group.bench_with_input(BenchmarkId::new("base64", size), &src, |b, src| {
                         b.iter(|| BASE64.encode_slice(black_box(src), &mut out))
@@ -134,15 +137,20 @@ fn encodes(c: &mut Criterion) {
 }
 
 fn decodes(c: &mut Criterion) {
-    for (name, opts) in [("unwrapped", UNWRAPPED), ("wrapped", WRAPPED)] {
+    for (name, wrap) in WRAPS {
+        let baseline = Base64Codec {
+            wrap,
+            ..Base64Codec::BASELINE
+        };
+
         let mut group = c.benchmark_group(format!("decode {name}"));
         group.warm_up_time(Duration::from_secs(1));
         group.measurement_time(Duration::from_secs(3));
 
         for size in SIZES {
             let raw = input(size);
-            let mut src = vec![0; encoded_len(size, opts).unwrap()];
-            encode(&raw, &mut src, Base64Cpu::BASELINE, opts).unwrap();
+            let mut src = vec![0; baseline.encoded_len(size).unwrap()];
+            baseline.encode(&raw, &mut src).unwrap();
 
             // NOTE: as long as the input, which base64-simd's forgiving
             // decoder asks for.
@@ -150,12 +158,14 @@ fn decodes(c: &mut Criterion) {
             group.throughput(Throughput::Bytes(size as u64));
 
             for (label, cpu) in cpus() {
+                let codec = Base64Codec { cpu, wrap };
+
                 group.bench_with_input(BenchmarkId::new(label, size), &src, |b, src| {
-                    b.iter(|| decode(black_box(src), &mut out, cpu))
+                    b.iter(|| codec.decode(black_box(src), &mut out))
                 });
             }
 
-            match opts.wrap {
+            match wrap {
                 None => {
                     group.bench_with_input(BenchmarkId::new("base64", size), &src, |b, src| {
                         b.iter(|| BASE64.decode_slice(black_box(src), &mut out))

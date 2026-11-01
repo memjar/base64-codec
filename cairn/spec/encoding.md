@@ -22,6 +22,6 @@ The encoder SHALL write the RFC 4648 4 standard alphabet, padded with `=` to a w
 With a line ending set, the encoder SHALL write lines of 76 characters, the last one possibly shorter, each ended by that line ending, the last one included (RFC 2045 6.8). Without one, it SHALL write a single unbroken run, as an RFC 2047 B encoded word needs.
 
 #### Scenario: One byte past a full line
-- GIVEN 58 bytes `x` and CRLF
+- GIVEN 58 bytes `x` and a codec with CRLF
 - WHEN they are encoded
-- THEN the output is 76 characters, CRLF, `eA==`, CRLF: 84 bytes, which `encoded_len` also returns
+- THEN the output is 76 characters, CRLF, `eA==`, CRLF: 84 bytes, which `Base64Codec::encoded_len` also returns

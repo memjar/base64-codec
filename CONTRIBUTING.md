@@ -37,7 +37,7 @@ cargo test --release --all-features
 RUSTFLAGS="-C target-cpu=native" cargo test --release --all-features
 ```
 
-The NEON backend builds for aarch64 and runs under qemu. Miri needs a nightly toolchain, and so do the fuzz targets, described in [fuzz/README.md](./fuzz/README.md).
+The NEON backend builds for aarch64 and runs under qemu, with `QEMU_CPU=neoverse-n1`: qemu's default model crashes the release tests, as [cairn/log/2026-11-01-a-codec-value.md](./cairn/log/2026-11-01-a-codec-value.md) tells. Miri needs a nightly toolchain, and so do the fuzz targets, described in [fuzz/README.md](./fuzz/README.md).
 
 ## Benchmarks
 

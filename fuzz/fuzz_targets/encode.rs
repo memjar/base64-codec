@@ -5,9 +5,9 @@
 #![no_main]
 
 use base64_codec::{
+    codec::{Base64Codec, Base64Eol},
     cpu::{Base64Backend, Base64Cpu},
-    decode::{decode, decoded_len_max},
-    encode::{Base64Encode, Base64EncodeOptions, Base64Eol, encode, encoded_len},
+    encode::Base64Encode,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -16,30 +16,30 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let opts = Base64EncodeOptions {
-        wrap: match options % 3 {
-            0 => None,
-            1 => Some(Base64Eol::Crlf),
-            _ => Some(Base64Eol::Lf),
-        },
+    let wrap = match options % 3 {
+        0 => None,
+        1 => Some(Base64Eol::Crlf),
+        _ => Some(Base64Eol::Lf),
     };
 
     let chunk = *chunk as usize + 1;
     let room = *room as usize % 64 + 6;
 
     // SAFETY: the scalar backend needs no CPU feature.
-    let scalar = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
-    let expected = one_shot(input, scalar, opts);
+    let cpu = unsafe { Base64Cpu::assume(Base64Backend::Scalar) };
+    let scalar = Base64Codec { cpu, wrap };
+    let expected = one_shot(input, scalar);
 
-    let mut decoded = vec![0; decoded_len_max(expected.len())];
-    let output = decode(&expected, &mut decoded, scalar).unwrap();
+    let mut decoded = vec![0; scalar.decoded_len_max(expected.len())];
+    let output = scalar.decode(&expected, &mut decoded).unwrap();
     assert_eq!(&decoded[..output.written], input);
     assert!(output.clean);
 
     for cpu in cpus() {
-        assert_eq!(one_shot(input, cpu, opts), expected, "{cpu:?}");
+        let codec = Base64Codec { cpu, wrap };
+        assert_eq!(one_shot(input, codec), expected, "{codec:?}");
 
-        let mut encoder = Base64Encode::new(cpu, opts);
+        let mut encoder = Base64Encode::new(codec);
         let mut out = Vec::new();
         let mut buffer = vec![0; room];
 
@@ -53,13 +53,13 @@ fuzz_target!(|data: &[u8]| {
 
         let end = encoder.finish(&mut buffer).unwrap();
         out.extend_from_slice(&buffer[..end]);
-        assert_eq!(out, expected, "{cpu:?} resumed");
+        assert_eq!(out, expected, "{codec:?} resumed");
     }
 });
 
-fn one_shot(input: &[u8], cpu: Base64Cpu, opts: Base64EncodeOptions) -> Vec<u8> {
-    let mut out = vec![0; encoded_len(input.len(), opts).unwrap()];
-    let written = encode(input, &mut out, cpu, opts).unwrap();
+fn one_shot(input: &[u8], codec: Base64Codec) -> Vec<u8> {
+    let mut out = vec![0; codec.encoded_len(input.len()).unwrap()];
+    let written = codec.encode(input, &mut out).unwrap();
     assert_eq!(written, out.len());
     out
 }

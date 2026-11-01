@@ -7,9 +7,9 @@
 //! is dropped and reported. Decoding never fails: it returns the bytes, and
 //! whether the input was clean.
 //!
-//! [`Base64Decode`] takes the input chunk by chunk; [`decode`] and
-//! `decode_vec` run it once over a whole input. Encoding is the sibling
-//! module [`encode`](crate::encode).
+//! [`Base64Decode`] takes the input chunk by chunk; the one-shot
+//! [`Base64Codec::decode`] and `Base64Codec::decode_vec` decode a whole
+//! input. Encoding is the sibling module [`encode`](crate::encode).
 
 use core::mem::MaybeUninit;
 
@@ -17,6 +17,7 @@ use core::mem::MaybeUninit;
 use alloc::vec::Vec;
 
 use crate::{
+    codec::Base64Codec,
     cpu::Base64Cpu,
     driver,
     scalar::{self, DecodeState, LINE, LINE_BYTES},
@@ -29,9 +30,9 @@ use crate::{
 /// at most three symbols from one call to the next.
 ///
 /// ```
-/// use base64_codec::{cpu::Base64Cpu, decode::Base64Decode};
+/// use base64_codec::{codec::Base64Codec, decode::Base64Decode};
 ///
-/// let mut decoder = Base64Decode::new(Base64Cpu::BASELINE);
+/// let mut decoder = Base64Decode::new(Base64Codec::BASELINE);
 /// let mut out = [0; 16];
 ///
 /// let first = decoder.resume(b"aGVs", &mut out);
@@ -51,10 +52,11 @@ pub struct Base64Decode {
 }
 
 impl Base64Decode {
-    /// Builds a decoder running the backend `cpu` names.
-    pub fn new(cpu: Base64Cpu) -> Self {
+    /// Builds a decoder running the backend of `codec`, whatever its line
+    /// ending: decoding takes any.
+    pub fn new(codec: Base64Codec) -> Self {
         Self {
-            cpu,
+            cpu: codec.cpu,
             state: DecodeState::new(),
         }
     }
@@ -140,65 +142,74 @@ pub struct Base64DecodeOutput {
     pub clean: bool,
 }
 
-/// Decodes the whole of `src` into `dst`.
-///
-/// Returns none, writing nothing, when `dst` is shorter than
-/// [`decoded_len_max`] asks. Within that length, the bytes of `dst` past the
-/// ones written may be overwritten.
-pub fn decode(src: &[u8], dst: &mut [u8], cpu: Base64Cpu) -> Option<Base64DecodeOutput> {
-    let dst = dst.get_mut(..decoded_len_max(src.len()))?;
-    Some(decode_all(src, driver::uninit(dst), cpu))
-}
-
-/// Decodes the whole of `src` at the end of `out`, returning whether it was
-/// well-formed.
-#[cfg(feature = "alloc")]
-#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
-pub fn decode_vec(src: &[u8], out: &mut Vec<u8>, cpu: Base64Cpu) -> bool {
-    let start = out.len();
-    out.reserve(decoded_len_max(src.len()));
-
-    let decoded = decode_all(src, out.spare_capacity_mut(), cpu);
-
-    // SAFETY: the decoder initialised the first `decoded.written` bytes.
-    unsafe { out.set_len(start + decoded.written) };
-
-    decoded.clean
-}
-
-/// The most bytes [`decode`] writes for an input of `len` bytes, whatever
-/// they hold.
-pub const fn decoded_len_max(len: usize) -> usize {
-    len - len.div_ceil(4)
-}
-
-/// [`decode`] into a `dst` sized by [`decoded_len_max`]: whole lines and one
-/// run when the input ends as usual, anything else by a decoder from where
-/// they stopped.
-fn decode_all(src: &[u8], dst: &mut [MaybeUninit<u8>], cpu: Base64Cpu) -> Base64DecodeOutput {
-    let (end, _) = scalar::trimmed(src);
-    let (read, mut written) = lines_and_run(cpu, &src[..end], dst);
-    let mut state = DecodeState::new();
-
-    if end - read < 4 && scalar::decode_tail(&mut state, &src[read..end], false) {
-        let tail = scalar::decode_finish(&mut state, &mut dst[written..]).unwrap_or(0);
-
-        return Base64DecodeOutput {
-            read: src.len(),
-            written: written + tail,
-            clean: state.clean,
-        };
+/// One-shot decoding.
+impl Base64Codec {
+    /// Decodes the whole of `src` into `dst`.
+    ///
+    /// Returns none, writing nothing, when `dst` is shorter than
+    /// [`decoded_len_max`](Self::decoded_len_max) asks. Within that length,
+    /// the bytes of `dst` past the ones written may be overwritten.
+    #[inline]
+    pub fn decode(self, src: &[u8], dst: &mut [u8]) -> Option<Base64DecodeOutput> {
+        let dst = dst.get_mut(..self.decoded_len_max(src.len()))?;
+        Some(self.decode_all(src, driver::uninit(dst)))
     }
 
-    let mut decoder = Base64Decode { cpu, state };
-    let (more_read, more_written) = decoder.run(&src[read..], &mut dst[written..]);
-    written += more_written;
-    let end = scalar::decode_finish(&mut decoder.state, &mut dst[written..]).unwrap_or(0);
+    /// Decodes the whole of `src` at the end of `out`, returning whether it
+    /// was well-formed.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    pub fn decode_vec(self, src: &[u8], out: &mut Vec<u8>) -> bool {
+        let start = out.len();
+        out.reserve(self.decoded_len_max(src.len()));
 
-    Base64DecodeOutput {
-        read: read + more_read,
-        written: written + end,
-        clean: decoder.state.clean,
+        let decoded = self.decode_all(src, out.spare_capacity_mut());
+
+        // SAFETY: the decoder initialised the first `decoded.written` bytes.
+        unsafe { out.set_len(start + decoded.written) };
+
+        decoded.clean
+    }
+
+    /// The most bytes [`decode`](Self::decode) writes for an input of `len`
+    /// bytes, whatever they hold.
+    pub const fn decoded_len_max(self, len: usize) -> usize {
+        len - len.div_ceil(4)
+    }
+
+    /// [`decode`](Self::decode) into a `dst` sized by
+    /// [`decoded_len_max`](Self::decoded_len_max): whole lines and one run
+    /// when the input ends as usual, anything else by a decoder from where
+    /// they stopped.
+    fn decode_all(self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> Base64DecodeOutput {
+        let (end, _) = scalar::trimmed(src);
+        let (read, mut written) = lines_and_run(self.cpu, &src[..end], dst);
+        let mut state = DecodeState::new();
+
+        if end - read < 4 && scalar::decode_tail(&mut state, &src[read..end], false) {
+            let tail = scalar::decode_finish(&mut state, &mut dst[written..]).unwrap_or(0);
+
+            return Base64DecodeOutput {
+                read: src.len(),
+                written: written + tail,
+                clean: state.clean,
+            };
+        }
+
+        let mut decoder = Base64Decode {
+            cpu: self.cpu,
+            state,
+        };
+
+        let (more_read, more_written) = decoder.run(&src[read..], &mut dst[written..]);
+        written += more_written;
+        let end = scalar::decode_finish(&mut decoder.state, &mut dst[written..]).unwrap_or(0);
+
+        Base64DecodeOutput {
+            read: read + more_read,
+            written: written + end,
+            clean: decoder.state.clean,
+        }
     }
 }
 
@@ -235,8 +246,9 @@ mod tests {
         let results: Vec<(Vec<u8>, bool)> = available()
             .into_iter()
             .map(|cpu| {
-                let mut out = vec![0; decoded_len_max(input.len())];
-                let output = decode(input, &mut out, cpu).unwrap();
+                let codec = Base64Codec { cpu, wrap: None };
+                let mut out = vec![0; codec.decoded_len_max(input.len())];
+                let output = codec.decode(input, &mut out).unwrap();
                 out.truncate(output.written);
                 (out, output.clean)
             })
@@ -300,7 +312,7 @@ mod tests {
     #[test]
     fn a_resumed_decode_joins_its_chunks() {
         for cpu in available() {
-            let mut decoder = Base64Decode::new(cpu);
+            let mut decoder = Base64Decode::new(Base64Codec { cpu, wrap: None });
             let mut out = [0; 8];
             let mut written = 0;
 
@@ -321,7 +333,7 @@ mod tests {
         let input = b"Zm9vYmFy\r\nZm9vYmFy\r\nZm9vYmE=\r\n";
 
         for cpu in available() {
-            let mut decoder = Base64Decode::new(cpu);
+            let mut decoder = Base64Decode::new(Base64Codec { cpu, wrap: None });
             let mut src = &input[..];
             let mut out = Vec::new();
             let mut room = [0; 3];
@@ -341,11 +353,12 @@ mod tests {
 
     #[test]
     fn a_short_buffer_writes_nothing() {
+        let codec = Base64Codec::BASELINE;
         let mut out = [0xaa; 2];
-        assert_eq!(decode(b"Zm9v", &mut out, Base64Cpu::BASELINE), None);
+        assert_eq!(codec.decode(b"Zm9v", &mut out), None);
         assert_eq!(out, [0xaa; 2]);
 
-        let mut decoder = Base64Decode::new(Base64Cpu::BASELINE);
+        let mut decoder = Base64Decode::new(codec);
         decoder.resume(b"Zm9", &mut []);
         assert_eq!(decoder.finish(&mut out[..1]), None);
         assert_eq!(decoder.finish(&mut out).map(|end| end.written), Some(2));
@@ -357,8 +370,9 @@ mod tests {
         let input = b"Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFy\r\nZm9v*\r\n";
 
         for cpu in available() {
+            let codec = Base64Codec { cpu, wrap: None };
             let mut out = b"> ".to_vec();
-            assert!(!decode_vec(input, &mut out, cpu));
+            assert!(!codec.decode_vec(input, &mut out));
             assert_eq!(out, b"> foobarfoobarfoobarfoobarfoobarfoobarfoo");
         }
     }

@@ -3,9 +3,8 @@
 //! clean flag for every input, the same encodings for every input.
 
 use base64_codec::{
+    codec::{Base64Codec, Base64Eol},
     cpu::{Base64Backend, Base64Cpu},
-    decode::{decode, decoded_len_max},
-    encode::{Base64EncodeOptions, Base64Eol, encode, encoded_len},
 };
 
 /// The bytes inputs are drawn from, base64 characters most often.
@@ -44,8 +43,9 @@ fn decoding_matches_the_wrapper() {
         let clean = wrapper::decode(input, &mut expected);
 
         for cpu in cpus() {
-            let mut out = vec![0; decoded_len_max(input.len())];
-            let output = decode(input, &mut out, cpu).unwrap();
+            let codec = Base64Codec { cpu, wrap: None };
+            let mut out = vec![0; codec.decoded_len_max(input.len())];
+            let output = codec.decode(input, &mut out).unwrap();
             out.truncate(output.written);
             assert_eq!(
                 (out, output.clean),
@@ -75,13 +75,12 @@ fn encoding_matches_the_wrapper() {
                 Some(_) => wrapper::encode(&bytes, eol, &mut expected),
             }
 
-            let opts = Base64EncodeOptions { wrap };
-
             for cpu in cpus() {
-                let mut out = vec![0; encoded_len(len, opts).unwrap()];
-                let written = encode(&bytes, &mut out, cpu, opts).unwrap();
+                let codec = Base64Codec { cpu, wrap };
+                let mut out = vec![0; codec.encoded_len(len).unwrap()];
+                let written = codec.encode(&bytes, &mut out).unwrap();
                 out.truncate(written);
-                assert_eq!(out, expected, "{cpu:?} {opts:?} {len}");
+                assert_eq!(out, expected, "{codec:?} {len}");
             }
         }
     }
