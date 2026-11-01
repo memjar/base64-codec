@@ -32,38 +32,32 @@ base64_driver!(
     ),
 );
 
-/// The classes the low nibbles of a block's characters allow, and the
-/// classes of their high nibbles: a character whose class its low nibble
-/// does not allow is outside the alphabet.
+/// The classes the low nibbles of a block's characters allow, and the classes
+/// of their high nibbles: a character whose class its low nibble does not
+/// allow is outside the alphabet.
 #[derive(Clone, Copy)]
 struct Bad(__m256i, __m256i);
 
 impl Bad {
-    /// One `vptest` tells whether a block holds a character outside the
-    /// alphabet, which costs less than joining the blocks of a group.
+    /// One `vptest` per block costs less than joining the blocks of a group.
     const EAGER: bool = true;
 
-    #[inline]
     #[target_feature(enable = "avx2")]
     fn none() -> Self {
         Self(_mm256_set1_epi8(-1), _mm256_setzero_si256())
     }
 
-    /// `self`, since every block is tested apart.
-    #[inline]
     fn join(self, _: Self) -> Self {
         self
     }
 
-    #[inline]
     #[target_feature(enable = "avx2")]
     fn any(self) -> bool {
         _mm256_testc_si256(self.0, self.1) == 0
     }
 
-    /// The characters of the whole quanta before the first character
-    /// outside the alphabet.
-    #[inline]
+    /// The characters of the whole quanta before the first one outside the
+    /// alphabet.
     #[target_feature(enable = "avx2")]
     fn first(self) -> usize {
         let bad = _mm256_cmpeq_epi8(_mm256_andnot_si256(self.0, self.1), _mm256_setzero_si256());
@@ -71,15 +65,12 @@ impl Bad {
     }
 }
 
-/// Decodes 32 characters into the first 24 bytes of `out`, by the SSSE3
-/// method over both lanes, and its 4 spare bytes when it holds 28: the 12
-/// bytes of each lane stored apart, or moved together first. The characters
-/// are the first 32 of `chars`, or when it holds more, its first `split` and
-/// the last ones.
+/// Decodes 32 characters into the first 24 bytes of `out` by the SSSE3 method
+/// over both lanes, plus 4 spare ones when it holds 28: the first 32 of
+/// `chars`, or its first `split` and its last ones.
 ///
 /// The low-nibble table holds the classes each low nibble allows, the
-/// complement of the SSSE3 one, and is looked up with the characters as they
-/// are: a character from 128 up looks up zero, which allows nothing.
+/// complement of the SSSE3 one.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn decode<const C: usize, const N: usize>(
@@ -89,8 +80,7 @@ fn decode<const C: usize, const N: usize>(
 ) -> Bad {
     const { assert!(C >= 32 && (N == 24 || N == 28)) };
 
-    // SAFETY: `chars` holds the 32 bytes each load reads, from its start and
-    // from its end, and the mask the 32 the third one reads.
+    // SAFETY: the loads read 32 bytes of `chars` and of the masks.
     let chars = unsafe {
         let first = _mm256_loadu_si256(chars.as_ptr().cast());
         let last = _mm256_loadu_si256(chars.as_ptr().add(C - 32).cast());
@@ -139,8 +129,7 @@ fn decode<const C: usize, const N: usize>(
     if N < 28 {
         let bytes = _mm256_permutevar8x32_epi32(bytes, _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 7, 7));
 
-        // SAFETY: `out` holds 24 bytes, the first 16 for the first store and
-        // the last 8 for the second.
+        // SAFETY: the stores write the 24 bytes of `out`.
         unsafe {
             _mm_storeu_si128(out.as_mut_ptr().cast(), _mm256_castsi256_si128(bytes));
             _mm_storel_epi64(
@@ -149,8 +138,8 @@ fn decode<const C: usize, const N: usize>(
             );
         }
     } else {
-        // SAFETY: `out` holds 28 bytes: the first store writes bytes 0 to
-        // 15, the second bytes 12 to 27, over the first lane's 4 spare ones.
+        // SAFETY: the stores write the 28 bytes of `out`, the second over the
+        // first lane's spare ones.
         unsafe {
             _mm_storeu_si128(out.as_mut_ptr().cast(), _mm256_castsi256_si128(bytes));
             _mm_storeu_si128(
@@ -163,11 +152,10 @@ fn decode<const C: usize, const N: usize>(
     Bad(allowed, class)
 }
 
-/// Encodes 24 bytes into 32 characters: from a window of 32, its group from
-/// its fifth byte, in one load landing the 12 bytes of each lane in place, or
-/// from the group alone, its halves loaded into their lanes apart. When `out`
-/// holds more than 32, the characters from `split` on land past the line
-/// ending that fills the rest.
+/// Encodes 24 bytes into 32 characters, from a window of 32 holding them from
+/// its fifth byte, in one load landing each lane's 12 bytes in place, or from
+/// the group alone, its halves loaded into their lanes; given room beyond 32,
+/// a line ending at `split`, as `spread` writes it.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn encode<const W: usize, const N: usize>(
@@ -178,11 +166,9 @@ fn encode<const W: usize, const N: usize>(
     const { assert!((W == 24 || W == 32) && N >= 32) };
 
     let spread = if W == 32 {
-        // SAFETY: `window` holds the 32 bytes the load reads.
+        // SAFETY: the load reads the 32 bytes of `window`.
         let bytes = unsafe { _mm256_loadu_si256(window.as_ptr().cast()) };
 
-        // NOTE: the low lane holds its groups from its fifth byte on, the
-        // high lane from its first.
         _mm256_shuffle_epi8(
             bytes,
             _mm256_setr_epi8(
@@ -191,8 +177,7 @@ fn encode<const W: usize, const N: usize>(
             ),
         )
     } else {
-        // SAFETY: `window` holds 24 bytes, the loads read the first 16 and
-        // the last 16.
+        // SAFETY: the loads read the 24 bytes of `window`.
         let (low, high) = unsafe {
             (
                 _mm_loadu_si128(window.as_ptr().cast()),
@@ -200,8 +185,6 @@ fn encode<const W: usize, const N: usize>(
             )
         };
 
-        // NOTE: the high lane holds bytes 8 to 23, its groups from its fifth
-        // byte on.
         _mm256_shuffle_epi8(
             _mm256_set_m128i(high, low),
             _mm256_setr_epi8(
@@ -213,7 +196,7 @@ fn encode<const W: usize, const N: usize>(
 
     let chars = ascii(sextets(spread));
 
-    // SAFETY: `out` holds the 32 bytes the store writes.
+    // SAFETY: the store writes 32 bytes of `out`.
     unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast(), chars) };
 
     if N > 32 {
@@ -221,8 +204,8 @@ fn encode<const W: usize, const N: usize>(
     }
 }
 
-/// The 256-bit `sextets` of the SSSE3 backend, its multipliers hidden by the
-/// SSSE3 `opaque` and broadcast.
+/// The SSSE3 `sextets` over 256 bits, its multipliers hidden by the SSSE3
+/// `opaque`.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn sextets(spread: __m256i) -> __m256i {
@@ -237,7 +220,7 @@ fn sextets(spread: __m256i) -> __m256i {
     _mm256_or_si256(first, second)
 }
 
-/// The 256-bit `ascii` of the SSSE3 backend.
+/// The SSSE3 `ascii` over 256 bits.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn ascii(sextets: __m256i) -> __m256i {

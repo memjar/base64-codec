@@ -5,11 +5,9 @@
 //! validated and translated by one lookup in a 128-byte table, and 48 bytes
 //! into 64 characters per encode step, spread by a permute, split by a
 //! multishift and translated by a lookup in the alphabet. What is shorter
-//! than one block is one block too, its load and store masked to it.
-//!
-//! NOTE: only those blocks are masked, as a masked access whose masked-off
-//! bytes cross into the next page, as an exact block ending a buffer does,
-//! costs about ten cycles.
+//! than one block is one block too, its load and store masked to it; whole
+//! blocks are not, as a masked access crossing into the next page costs about
+//! ten cycles.
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -23,8 +21,8 @@ use crate::scalar::ALPHABET;
 /// alphabet, in two halves of 64.
 static DECODE: [[u8; 64]; 2] = decode_table();
 
-/// The byte of `quads` each of the 48 decoded bytes comes from: the three
-/// low bytes of each 32-bit lane, highest first.
+/// The byte of `quads` each of the 48 decoded bytes comes from: the three low
+/// bytes of each 32-bit lane, highest first.
 static PACK: [u8; 64] = pack_table();
 
 /// The byte of the input each byte of the spread comes from: the three bytes
@@ -54,39 +52,34 @@ base64_driver!(
 struct Bad(__m512i);
 
 impl Bad {
-    /// Blocks are joined and tested once per group.
     const EAGER: bool = false;
 
-    #[inline]
     #[target_feature(enable = "avx512vbmi")]
     fn none() -> Self {
         Self(_mm512_setzero_si512())
     }
 
-    #[inline]
     #[target_feature(enable = "avx512vbmi")]
     fn join(self, other: Self) -> Self {
         Self(_mm512_or_si512(self.0, other.0))
     }
 
-    #[inline]
     #[target_feature(enable = "avx512vbmi")]
     fn any(self) -> bool {
         _mm512_movepi8_mask(self.0) != 0
     }
 
-    /// The characters of the whole quanta before the first character
-    /// outside the alphabet.
-    #[inline]
+    /// The characters of the whole quanta before the first one outside the
+    /// alphabet.
     #[target_feature(enable = "avx512vbmi")]
     fn first(self) -> usize {
         _mm512_movepi8_mask(self.0).trailing_zeros() as usize / 4 * 4
     }
 }
 
-/// Decodes 64 characters into the first 48 bytes of `out`, and its 16 spare
-/// bytes when it holds 64: the first 64 of `chars`, or when it holds more,
-/// its first `split` and the last ones.
+/// Decodes 64 characters into the first 48 bytes of `out`, plus 16 spare ones
+/// when it holds 64: the first 64 of `chars`, or its first `split` and its
+/// last ones.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn decode<const C: usize, const N: usize>(
@@ -96,8 +89,7 @@ fn decode<const C: usize, const N: usize>(
 ) -> Bad {
     const { assert!(C >= 64 && (N == 48 || N == 64)) };
 
-    // SAFETY: `chars` holds the 64 bytes each load reads, from its start and
-    // from its end.
+    // SAFETY: the loads read 64 bytes of `chars`.
     let chars = unsafe {
         let first = _mm512_loadu_si512(chars.as_ptr().cast());
         let last = _mm512_loadu_si512(chars.as_ptr().add(C - 64).cast());
@@ -107,8 +99,7 @@ fn decode<const C: usize, const N: usize>(
     let (bytes, bad) = decode_vector(chars);
 
     if N < 64 {
-        // SAFETY: `out` holds 48 bytes, the first 32 for the first store and
-        // the last 16 for the second.
+        // SAFETY: the stores write the 48 bytes of `out`.
         unsafe {
             _mm256_storeu_si256(out.as_mut_ptr().cast(), _mm512_castsi512_si256(bytes));
             _mm_storeu_si128(
@@ -117,17 +108,16 @@ fn decode<const C: usize, const N: usize>(
             );
         }
     } else {
-        // SAFETY: `out` holds the 64 bytes the store writes.
+        // SAFETY: the store writes the 64 bytes of `out`.
         unsafe { _mm512_storeu_si512(out.as_mut_ptr().cast(), bytes) };
     }
 
     bad
 }
 
-/// Encodes 48 bytes into 64 characters: the first 48 of a window of 64, its
-/// last 16 only loaded along, or the group alone. When `out` holds more than
-/// 64, the characters from `split` on land past the line ending that fills
-/// the rest.
+/// Encodes 48 bytes into 64 characters, from the first 48 of a window of 64
+/// or from the group alone; given room beyond 64, a line ending fills it at
+/// `split` when not past 64, the characters from `split` on moved past it.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn encode<const W: usize, const N: usize>(
@@ -138,8 +128,7 @@ fn encode<const W: usize, const N: usize>(
     const { assert!((W == 48 || W == 64) && N >= 64) };
 
     let bytes = if W < 64 {
-        // SAFETY: `window` holds 48 bytes, the loads read the first 32 and
-        // the last 16.
+        // SAFETY: the loads read the 48 bytes of `window`.
         unsafe {
             _mm512_inserti32x4::<2>(
                 _mm512_castsi256_si512(_mm256_loadu_si256(window.as_ptr().cast())),
@@ -147,33 +136,34 @@ fn encode<const W: usize, const N: usize>(
             )
         }
     } else {
-        // SAFETY: `window` holds the 64 bytes the load reads.
+        // SAFETY: the load reads the 64 bytes of `window`.
         unsafe { _mm512_loadu_si512(window.as_ptr().cast()) }
     };
 
     let chars = encode_vector(bytes);
 
-    // SAFETY: `out` holds the 64 bytes the first store writes, and the last
-    // 64 the second one writes from `split` on.
+    // SAFETY: the stores write the first and the last 64 bytes of `out`.
     unsafe {
         _mm512_storeu_si512(out.as_mut_ptr().cast(), chars);
 
-        if N > 64 && split < 64 {
-            let to = out.as_mut_ptr().add(N - 64).cast();
-            _mm512_mask_storeu_epi8(to, !(u64::MAX >> (64 - split)), chars);
+        if N > 64 && split <= 64 {
+            let from = u64::MAX << (split - (N - 64));
+            let ends = _mm512_set1_epi16(if N == 66 { 0x0a0d } else { 0x0a0a });
+            let chars = _mm512_mask_blend_epi8(from & u64::MAX >> (64 - split), chars, ends);
+            _mm512_mask_storeu_epi8(out.as_mut_ptr().add(N - 64).cast(), from, chars);
         }
     }
 }
 
-/// Decodes the whole quanta of alphabet characters at the start of `src`
-/// that fit in `dst`, fewer than a block, up to the first other byte,
-/// returning the characters read: quantum by quantum when one is outside the
-/// alphabet, so that the length read waits on no test.
+/// Decodes the whole quanta of alphabet characters at the start of `src` that
+/// fit in `dst`, fewer than a block, returning the characters read; quantum
+/// by quantum when one is outside the alphabet, so that the length waits on
+/// no test.
 #[target_feature(enable = "avx512vbmi")]
 fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let chars = (src.len() / 4).min(dst.len() / 3).min(15) * 4;
 
-    // SAFETY: the load reads the first `chars` bytes of `src` alone.
+    // SAFETY: the load reads the first `chars` bytes of `src`.
     let (bytes, bad) =
         decode_vector(unsafe { _mm512_maskz_loadu_epi8(mask(chars), src.as_ptr().cast()) });
 
@@ -181,8 +171,7 @@ fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
         return crate::scalar::decode_quanta(src, dst);
     }
 
-    // SAFETY: the store writes the first `chars / 4 * 3` bytes of `dst`
-    // alone, which it holds.
+    // SAFETY: the store writes the first `chars / 4 * 3` bytes of `dst`.
     unsafe { _mm512_mask_storeu_epi8(dst.as_mut_ptr().cast(), mask(chars / 4 * 3), bytes) };
 
     chars
@@ -194,19 +183,18 @@ fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
 fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
     let bytes = (src.len() / 3).min(dst.len() / 4).min(15) * 3;
 
-    // SAFETY: the load reads the first `bytes` bytes of `src` alone.
+    // SAFETY: the load reads the first `bytes` bytes of `src`.
     let chars = encode_vector(unsafe { _mm512_maskz_loadu_epi8(mask(bytes), src.as_ptr().cast()) });
 
-    // SAFETY: the store writes the first `bytes / 3 * 4` bytes of `dst`
-    // alone, which it holds.
+    // SAFETY: the store writes the first `bytes / 3 * 4` bytes of `dst`.
     unsafe { _mm512_mask_storeu_epi8(dst.as_mut_ptr().cast(), mask(bytes / 3 * 4), chars) };
 
     bytes
 }
 
 /// The 48 bytes of 64 characters, first in the vector, and the characters
-/// outside the alphabet: a character from 128 up, or one the table maps to
-/// 128, has its highest bit set once joined with its sextet.
+/// outside the alphabet: one from 128 up, or one the table maps to 128, has
+/// its highest bit set once joined with its sextet.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn decode_vector(chars: __m512i) -> (__m512i, Bad) {
@@ -231,16 +219,13 @@ fn encode_vector(bytes: __m512i) -> __m512i {
     _mm512_permutexvar_epi8(sextets, vector(ALPHABET))
 }
 
-/// The 64 bytes of `bytes` as a vector.
-#[inline]
 #[target_feature(enable = "avx512vbmi")]
 fn vector(bytes: &[u8; 64]) -> __m512i {
-    // SAFETY: `bytes` holds the 64 bytes the load reads.
+    // SAFETY: the load reads the 64 bytes of `bytes`.
     unsafe { _mm512_loadu_si512(bytes.as_ptr().cast()) }
 }
 
 /// The mask of the first `len` bytes of a vector, `len` below 64.
-#[inline]
 fn mask(len: usize) -> u64 {
     (1 << len) - 1
 }

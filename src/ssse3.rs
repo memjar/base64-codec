@@ -34,30 +34,25 @@ base64_driver!(
 struct Bad(__m128i);
 
 impl Bad {
-    /// Blocks are joined and tested once per group.
     const EAGER: bool = false;
 
-    #[inline]
     #[target_feature(enable = "ssse3")]
     fn none() -> Self {
         Self(_mm_setzero_si128())
     }
 
-    #[inline]
     #[target_feature(enable = "ssse3")]
     fn join(self, other: Self) -> Self {
         Self(_mm_or_si128(self.0, other.0))
     }
 
-    #[inline]
     #[target_feature(enable = "ssse3")]
     fn any(self) -> bool {
         self.first() < 16
     }
 
-    /// The characters of the whole quanta before the first character
-    /// outside the alphabet, 16 when there is none.
-    #[inline]
+    /// The characters of the whole quanta before the first one outside the
+    /// alphabet, 16 when there is none.
     #[target_feature(enable = "ssse3")]
     fn first(self) -> usize {
         let valid = _mm_movemask_epi8(_mm_cmpeq_epi8(self.0, _mm_setzero_si128()));
@@ -65,15 +60,15 @@ impl Bad {
     }
 }
 
-/// Decodes 16 characters into the first 12 bytes of `out`, and its 4 spare
-/// bytes when it holds 16: the first 16 of `chars`, or when it holds more,
-/// its first `split` and the last ones.
+/// Decodes 16 characters into the first 12 bytes of `out`, plus 4 spare ones
+/// when it holds 16: the first 16 of `chars`, or its first `split` and its
+/// last ones.
 ///
-/// The high nibble of a character picks its class, and its low nibble the
-/// classes it allows, looked up with the character as it is: one from 128 up
-/// looks up zero, which allows nothing. The high nibble also picks the offset
-/// to the sextet, `/` landing past 63, where the sextets are clamped. The
-/// four sextets of each 32-bit lane are then packed into three bytes.
+/// The high nibble of a character picks its class, and its low nibble, looked
+/// up as the character is, the classes it allows: a character from 128 up
+/// allows none. The high nibble also picks the offset to the sextet, `/`
+/// landing past 63, where the sextets are clamped. The four sextets of each
+/// 32-bit lane are then packed into three bytes.
 #[inline]
 #[target_feature(enable = "ssse3")]
 fn decode<const C: usize, const N: usize>(
@@ -83,8 +78,7 @@ fn decode<const C: usize, const N: usize>(
 ) -> Bad {
     const { assert!(C >= 16 && (N == 12 || N == 16)) };
 
-    // SAFETY: `chars` holds the 16 bytes each load reads, from its start and
-    // from its end, and the mask the 16 the third one reads.
+    // SAFETY: the loads read 16 bytes of `chars` and of the masks.
     let chars = unsafe {
         let first = _mm_loadu_si128(chars.as_ptr().cast());
         let last = _mm_loadu_si128(chars.as_ptr().add(C - 16).cast());
@@ -129,24 +123,22 @@ fn decode<const C: usize, const N: usize>(
     if N < 16 {
         let tail = _mm_cvtsi128_si32(_mm_srli_si128::<8>(bytes));
 
-        // SAFETY: `out` holds 12 bytes, the first 8 for the first store and
-        // the last 4 for the second.
+        // SAFETY: the stores write the 12 bytes of `out`.
         unsafe {
             _mm_storel_epi64(out.as_mut_ptr().cast(), bytes);
             out.as_mut_ptr().add(8).cast::<i32>().write_unaligned(tail);
         }
     } else {
-        // SAFETY: `out` holds the 16 bytes the store writes.
+        // SAFETY: the store writes the 16 bytes of `out`.
         unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), bytes) };
     }
 
     Bad(_mm_andnot_si128(allowed, class))
 }
 
-/// Encodes 12 bytes into 16 characters: from a window of 16, its group from
-/// its fifth byte, in one load, or from the group alone, in two. When `out`
-/// holds more than 16, the characters from `split` on land past the line
-/// ending that fills the rest.
+/// Encodes 12 bytes into 16 characters, from a window of 16 holding them from
+/// its fifth byte or from the group alone; given room beyond 16, a line
+/// ending at `split`, as `spread` writes it.
 #[inline]
 #[target_feature(enable = "ssse3")]
 fn encode<const W: usize, const N: usize>(
@@ -157,15 +149,14 @@ fn encode<const W: usize, const N: usize>(
     const { assert!((W == 12 || W == 16) && N >= 16) };
 
     let spread = if W == 16 {
-        // SAFETY: `window` holds the 16 bytes the load reads.
+        // SAFETY: the load reads the 16 bytes of `window`.
         let bytes = unsafe { _mm_loadu_si128(window.as_ptr().cast()) };
         _mm_shuffle_epi8(
             bytes,
             _mm_setr_epi8(5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14),
         )
     } else {
-        // SAFETY: `window` holds 12 bytes, the loads read the first 8 and the
-        // last 4.
+        // SAFETY: the loads read the 12 bytes of `window`.
         let (low, high) = unsafe {
             (
                 window.as_ptr().cast::<i64>().read_unaligned(),
@@ -179,7 +170,7 @@ fn encode<const W: usize, const N: usize>(
         )
     };
 
-    // SAFETY: `out` holds the 16 bytes the store writes.
+    // SAFETY: the store writes 16 bytes of `out`.
     unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(sextets(spread))) };
 
     if N > 16 {
@@ -187,13 +178,12 @@ fn encode<const W: usize, const N: usize>(
     }
 }
 
-/// The four sextets of each 32-bit lane, from the three bytes spread over
-/// it as `[b, a, c, b]`: each 16-bit half moves its two fields into place
-/// with one low multiply, the first field shifted out of its high bits.
+/// The four sextets of each 32-bit lane, from its three bytes spread as
+/// `[b, a, c, b]`: each 16-bit half moves its two fields into place with one
+/// low multiply, the first field shifted out of its high bits.
 ///
 /// NOTE: the multipliers are powers of two hidden from the compiler, which
-/// otherwise rewrites the multiplies into shifts and blends, several times
-/// the cost.
+/// otherwise rewrites the multiplies into slower shifts and blends.
 #[inline]
 #[target_feature(enable = "ssse3")]
 fn sextets(spread: __m128i) -> __m128i {
@@ -227,14 +217,13 @@ fn ascii(sextets: __m128i) -> __m128i {
     _mm_add_epi8(sextets, offsets)
 }
 
-/// `value`, through an empty assembly block the compiler cannot see into,
-/// yet free to hoist out of a loop since it is pure.
+/// `value` through an empty assembly block the compiler cannot see into, yet
+/// can hoist out of a loop since it is pure.
 #[cfg(not(miri))]
 #[inline]
 #[target_feature(enable = "ssse3")]
 pub(crate) fn opaque(mut value: __m128i) -> __m128i {
-    // SAFETY: the template is empty: it leaves its register as it is, and
-    // touches no other register, no flag and no memory.
+    // SAFETY: the empty template touches nothing but its register.
     unsafe {
         core::arch::asm!(
             "/* {0} */",
@@ -246,7 +235,7 @@ pub(crate) fn opaque(mut value: __m128i) -> __m128i {
     value
 }
 
-/// `value` as it is, since Miri runs no assembly.
+/// `value`, since Miri runs no assembly.
 #[cfg(miri)]
 #[inline]
 #[target_feature(enable = "ssse3")]

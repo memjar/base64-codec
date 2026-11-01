@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: past-the-periods
-status: draft
+status: landed
 created: 2026-11-01
 ---
 

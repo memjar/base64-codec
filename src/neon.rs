@@ -41,31 +41,26 @@ base64_driver!(
 struct Bad(uint8x16_t);
 
 impl Bad {
-    /// Blocks are joined and tested once per group.
     const EAGER: bool = false;
 
-    #[inline]
     #[target_feature(enable = "neon")]
     fn none() -> Self {
         Self(vdupq_n_u8(1))
     }
 
-    #[inline]
     #[target_feature(enable = "neon")]
     fn join(self, other: Self) -> Self {
         Self(vminq_u8(self.0, other.0))
     }
 
-    #[inline]
     #[target_feature(enable = "neon")]
     fn any(self) -> bool {
         vminvq_u8(self.0) == 0
     }
 
-    /// The characters of the whole quanta before the first character
-    /// outside the alphabet: the zero lanes, narrowed to 4 bits each, count
-    /// 4 trailing zeros per quantum before them.
-    #[inline]
+    /// The characters of the whole quanta before the first one outside the
+    /// alphabet: the zero lanes, narrowed to 4 bits each, count 4 trailing
+    /// zeros per quantum before them.
     #[target_feature(enable = "neon")]
     fn first(self) -> usize {
         let zero = vreinterpretq_u16_u8(vceqzq_u8(self.0));
@@ -74,16 +69,15 @@ impl Bad {
     }
 }
 
-/// Decodes 64 characters into 48 bytes: the first 64 of `chars`, or when it
-/// holds more, its first `split` and the last ones, picked quantum by
-/// quantum from the deinterleaved vectors.
+/// Decodes 64 characters into 48 bytes: the first 64 of `chars`, or its first
+/// `split` and its last ones, picked quantum by quantum from the
+/// deinterleaved vectors.
 #[inline]
 #[target_feature(enable = "neon")]
 fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<u8>; 48]) -> Bad {
     const { assert!(C >= 64) };
 
-    // SAFETY: `chars` holds the 64 bytes each load reads, from its start and
-    // from its end, and the mask the 16 the third one reads.
+    // SAFETY: the loads read 64 bytes of `chars` and 16 of the masks.
     let chars = unsafe {
         let (first, last) = (
             vld4q_u8(chars.as_ptr()),
@@ -121,14 +115,14 @@ fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<
         vorrq_u8(vshlq_n_u8::<6>(c), d),
     );
 
-    // SAFETY: `out` holds the 48 bytes the store writes.
+    // SAFETY: the store writes the 48 bytes of `out`.
     unsafe { vst3q_u8(out.as_mut_ptr().cast(), bytes) };
 
     bad
 }
 
-/// Encodes 48 bytes into 64 characters, those from `split` on past the line
-/// ending that fills the rest of `out` when it holds more.
+/// Encodes 48 bytes into 64 characters; given room beyond 64, a line ending
+/// at `split`, as `spread` writes it.
 #[inline]
 #[target_feature(enable = "neon")]
 fn encode<const W: usize, const N: usize>(
@@ -138,7 +132,7 @@ fn encode<const W: usize, const N: usize>(
 ) {
     const { assert!(W == 48 && N >= 64) };
 
-    // SAFETY: `bytes` holds the 48 bytes the load reads.
+    // SAFETY: the load reads the 48 bytes of `bytes`.
     let bytes = unsafe { vld3q_u8(bytes.as_ptr()) };
     let mask = vdupq_n_u8(0x3f);
     let alphabet = table(ALPHABET);
@@ -161,7 +155,7 @@ fn encode<const W: usize, const N: usize>(
         vqtbl4q_u8(alphabet, d),
     );
 
-    // SAFETY: `out` holds the 64 bytes the store writes.
+    // SAFETY: the store writes 64 bytes of `out`.
     unsafe { vst4q_u8(out.as_mut_ptr().cast(), chars) };
 
     if N > 64 {
@@ -178,10 +172,9 @@ fn translate(chars: uint8x16_t, low: uint8x16x4_t, high: uint8x16x4_t) -> uint8x
     vorrq_u8(vqtbl4q_u8(low, chars), vqtbl4q_u8(high, shifted))
 }
 
-#[inline]
 #[target_feature(enable = "neon")]
 fn table(bytes: &[u8; 64]) -> uint8x16x4_t {
-    // SAFETY: `bytes` holds the 64 bytes the load reads.
+    // SAFETY: the load reads the 64 bytes of `bytes`.
     unsafe { vld1q_u8_x4(bytes.as_ptr()) }
 }
 

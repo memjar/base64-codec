@@ -99,8 +99,9 @@ impl Base64Encode {
                 written += bytes / 3 * 4;
             } else {
                 // SAFETY: as above.
-                let lines =
-                    unsafe { (loops.encode_lines)(&src[read..], &mut dst[written..], state.eol) };
+                let lines = unsafe {
+                    (loops.encode_lines[state.eol.len() - 1])(&src[read..], &mut dst[written..])
+                };
 
                 read += lines * LINE_BYTES;
                 written += lines * (LINE + state.eol.len());
@@ -176,8 +177,7 @@ pub fn encode_vec(src: &[u8], out: &mut Vec<u8>, cpu: Base64Cpu, opts: Base64Enc
 
     let written = encode_all(src, out.spare_capacity_mut(), cpu, opts);
 
-    // SAFETY: the encoder wrote `written` initialised bytes at the start of
-    // the spare capacity.
+    // SAFETY: the encoder initialised the first `written` bytes.
     unsafe { out.set_len(start + written) };
 }
 
@@ -189,9 +189,9 @@ pub fn encoded_len(len: usize, opts: Base64EncodeOptions) -> Option<usize> {
     chars.checked_add(lines.checked_mul(opts.eol().len())?)
 }
 
-/// [`encode`] into a `dst` sized by [`encoded_len`], in one pass with no
-/// [`Base64Encode`] state: whole lines when wrapped, the whole groups left,
-/// the padded tail and the last line ending.
+/// [`encode`] into a `dst` sized by [`encoded_len`], with no [`Base64Encode`]
+/// state: one run and the padded tail when unwrapped, else whole lines first
+/// and the last line ending after the tail.
 fn encode_all(
     src: &[u8],
     dst: &mut [MaybeUninit<u8>],
@@ -200,21 +200,22 @@ fn encode_all(
 ) -> usize {
     let loops = cpu.loops();
     let eol = opts.eol();
-    let mut read = 0;
-    let mut written = 0;
 
-    if !eol.is_empty() {
+    if eol.is_empty() {
         // SAFETY: the token names a backend the CPU supports.
-        let lines = unsafe { (loops.encode_lines)(src, dst, eol) };
-        read = lines * LINE_BYTES;
-        written = lines * (LINE + eol.len());
+        let bytes = unsafe { (loops.encode_run)(src, dst) };
+        let written = bytes / 3 * 4;
+        return written + scalar::encode_tail(&src[bytes..], &mut dst[written..]);
     }
 
-    let start = written;
+    // SAFETY: as above.
+    let lines = unsafe { (loops.encode_lines[eol.len() - 1])(src, dst) };
+    let read = lines * LINE_BYTES;
+    let start = lines * (LINE + eol.len());
 
     // SAFETY: as above.
-    let bytes = unsafe { (loops.encode_run)(&src[read..], &mut dst[written..]) };
-    written += bytes / 3 * 4;
+    let bytes = unsafe { (loops.encode_run)(&src[read..], &mut dst[start..]) };
+    let mut written = start + bytes / 3 * 4;
     written += scalar::encode_tail(&src[read + bytes..], &mut dst[written..]);
 
     if written == start {
