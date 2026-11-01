@@ -121,45 +121,48 @@ fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<
     bad
 }
 
-/// Encodes 48 bytes into 64 characters; given room beyond 64, a line ending
-/// at `split`, as `spread` writes it.
+/// Encodes the `K` groups of 48 bytes of `bytes` into 64 characters each;
+/// given room beyond 64, a line ending at `split`, as `spread` writes it.
 #[inline]
 #[target_feature(enable = "neon")]
-fn encode<const W: usize, const N: usize>(
-    bytes: &[u8; W],
+fn encode<const S: usize, const N: usize, const K: usize>(
+    bytes: &[u8; S],
     split: usize,
-    out: &mut [MaybeUninit<u8>; N],
+    outs: [&mut [MaybeUninit<u8>; N]; K],
 ) {
-    const { assert!(W == 48 && N >= 64) };
+    const { assert!(S == 48 * K && N >= 64) };
 
-    // SAFETY: the load reads the 48 bytes of `bytes`.
-    let bytes = unsafe { vld3q_u8(bytes.as_ptr()) };
     let mask = vdupq_n_u8(0x3f);
     let alphabet = table(ALPHABET);
 
-    let a = vshrq_n_u8::<2>(bytes.0);
-    let b = vandq_u8(
-        vorrq_u8(vshlq_n_u8::<4>(bytes.0), vshrq_n_u8::<4>(bytes.1)),
-        mask,
-    );
-    let c = vandq_u8(
-        vorrq_u8(vshlq_n_u8::<2>(bytes.1), vshrq_n_u8::<6>(bytes.2)),
-        mask,
-    );
-    let d = vandq_u8(bytes.2, mask);
+    for (group, out) in bytes.as_chunks::<48>().0.iter().zip(outs) {
+        // SAFETY: the load reads the 48 bytes of `group`.
+        let bytes = unsafe { vld3q_u8(group.as_ptr()) };
 
-    let chars = uint8x16x4_t(
-        vqtbl4q_u8(alphabet, a),
-        vqtbl4q_u8(alphabet, b),
-        vqtbl4q_u8(alphabet, c),
-        vqtbl4q_u8(alphabet, d),
-    );
+        let a = vshrq_n_u8::<2>(bytes.0);
+        let b = vandq_u8(
+            vorrq_u8(vshlq_n_u8::<4>(bytes.0), vshrq_n_u8::<4>(bytes.1)),
+            mask,
+        );
+        let c = vandq_u8(
+            vorrq_u8(vshlq_n_u8::<2>(bytes.1), vshrq_n_u8::<6>(bytes.2)),
+            mask,
+        );
+        let d = vandq_u8(bytes.2, mask);
 
-    // SAFETY: the store writes 64 bytes of `out`.
-    unsafe { vst4q_u8(out.as_mut_ptr().cast(), chars) };
+        let chars = uint8x16x4_t(
+            vqtbl4q_u8(alphabet, a),
+            vqtbl4q_u8(alphabet, b),
+            vqtbl4q_u8(alphabet, c),
+            vqtbl4q_u8(alphabet, d),
+        );
 
-    if N > 64 {
-        crate::driver::spread(out, split, 64);
+        // SAFETY: the store writes 64 bytes of `out`.
+        unsafe { vst4q_u8(out.as_mut_ptr().cast(), chars) };
+
+        if N > 64 {
+            crate::driver::spread(out, split, 64);
+        }
     }
 }
 
@@ -205,7 +208,7 @@ mod tests {
         check_decode_kernel(|chars, split, out| unsafe { run(decode::<66>(chars, split, out)) });
         // SAFETY: as above.
         check_encode_kernel(0, |bytes, split, out| unsafe {
-            encode::<48, 66>(bytes, split, out)
+            encode::<48, 66, 1>(bytes, split, [out])
         });
     }
 

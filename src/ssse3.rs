@@ -136,93 +136,92 @@ fn decode<const C: usize, const N: usize>(
     Bad(_mm_andnot_si128(allowed, class))
 }
 
-/// Encodes 12 bytes into 16 characters, from a window of 16 holding them from
-/// its fifth byte or from the group alone; given room beyond 16, a line
-/// ending at `split`, as `spread` writes it.
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn encode<const W: usize, const N: usize>(
-    window: &[u8; W],
-    split: usize,
-    out: &mut [MaybeUninit<u8>; N],
-) {
-    const { assert!((W == 12 || W == 16) && N >= 16) };
-
-    let spread = if W == 16 {
-        // SAFETY: the load reads the 16 bytes of `window`.
-        let bytes = unsafe { _mm_loadu_si128(window.as_ptr().cast()) };
-        _mm_shuffle_epi8(
-            bytes,
-            _mm_setr_epi8(5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14),
-        )
-    } else {
-        // SAFETY: the loads read the 12 bytes of `window`.
-        let (low, high) = unsafe {
-            (
-                window.as_ptr().cast::<i64>().read_unaligned(),
-                window.as_ptr().add(8).cast::<u32>().read_unaligned(),
-            )
-        };
-
-        _mm_shuffle_epi8(
-            _mm_set_epi64x(i64::from(high), low),
-            _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10),
-        )
-    };
-
-    // SAFETY: the store writes 16 bytes of `out`.
-    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(sextets(spread))) };
-
-    if N > 16 {
-        crate::driver::spread(out, split, 16);
-    }
-}
-
-/// The four sextets of each 32-bit lane, from its three bytes spread as
-/// `[b, a, c, b]`: each 16-bit half moves its two fields into place with one
-/// low multiply, the first field shifted out of its high bits.
+/// Encodes the `K` groups of 12 bytes `bytes` holds 12 bytes apart into 16
+/// characters each, from windows of 16 holding each group from their fifth
+/// byte or from a lone group; given room beyond 16, a line ending at `split`,
+/// as `spread` writes it.
+///
+/// Each 32-bit lane spread as `[b, a, c, b]` moves the two sextets of each
+/// 16-bit half into place with one low multiply, the first one shifted out of
+/// its high bits; each range of the alphabet, numbered by saturating
+/// arithmetic, then gets its offset from one lookup.
 ///
 /// NOTE: the multipliers are powers of two hidden from the compiler, which
 /// otherwise rewrites the multiplies into slower shifts and blends.
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn sextets(spread: __m128i) -> __m128i {
-    let first = _mm_srli_epi16::<10>(_mm_mullo_epi16(spread, opaque(_mm_set1_epi32(0x0010_0001))));
+fn encode<const S: usize, const N: usize, const K: usize>(
+    bytes: &[u8; S],
+    split: usize,
+    outs: [&mut [MaybeUninit<u8>; N]; K],
+) {
+    const { assert!(matches!(S - 12 * (K - 1), 12 | 16) && N >= 16) };
 
-    let second = _mm_mullo_epi16(
-        _mm_and_si128(spread, _mm_set1_epi32(0x003f_03f0)),
-        opaque(_mm_set1_epi32(0x0100_0010)),
-    );
+    for (group, out) in outs.into_iter().enumerate() {
+        let at = 12 * group;
 
-    _mm_or_si128(first, second)
-}
+        let spread = if S - 12 * (K - 1) == 16 {
+            // SAFETY: the load reads 16 bytes of `bytes`, as asserted above.
+            let window = unsafe { _mm_loadu_si128(bytes.as_ptr().add(at).cast()) };
 
-/// The characters of 16 sextets: each range of the alphabet, numbered by
-/// saturating arithmetic, gets its offset from one lookup.
-#[inline]
-#[target_feature(enable = "ssse3")]
-fn ascii(sextets: __m128i) -> __m128i {
-    let ranges = _mm_sub_epi8(
-        _mm_subs_epu8(sextets, _mm_set1_epi8(51)),
-        _mm_cmpgt_epi8(sextets, _mm_set1_epi8(25)),
-    );
+            _mm_shuffle_epi8(
+                window,
+                _mm_setr_epi8(5, 4, 6, 5, 8, 7, 9, 8, 11, 10, 12, 11, 14, 13, 15, 14),
+            )
+        } else {
+            // SAFETY: the loads read 12 bytes of `bytes`, as asserted above.
+            let (low, high) = unsafe {
+                (
+                    bytes.as_ptr().add(at).cast::<i64>().read_unaligned(),
+                    bytes.as_ptr().add(at + 8).cast::<u32>().read_unaligned(),
+                )
+            };
 
-    let offsets = _mm_shuffle_epi8(
-        _mm_setr_epi8(
-            65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0,
-        ),
-        ranges,
-    );
+            _mm_shuffle_epi8(
+                _mm_set_epi64x(i64::from(high), low),
+                _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10),
+            )
+        };
 
-    _mm_add_epi8(sextets, offsets)
+        let first =
+            _mm_srli_epi16::<10>(_mm_mullo_epi16(spread, opaque(_mm_set1_epi32(0x0010_0001))));
+
+        let second = _mm_mullo_epi16(
+            _mm_and_si128(spread, _mm_set1_epi32(0x003f_03f0)),
+            opaque(_mm_set1_epi32(0x0100_0010)),
+        );
+
+        let sextets = _mm_or_si128(first, second);
+
+        let ranges = _mm_sub_epi8(
+            _mm_subs_epu8(sextets, _mm_set1_epi8(51)),
+            _mm_cmpgt_epi8(sextets, _mm_set1_epi8(25)),
+        );
+
+        let offsets = _mm_shuffle_epi8(
+            _mm_setr_epi8(
+                65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0,
+            ),
+            ranges,
+        );
+
+        // SAFETY: the store writes 16 bytes of `out`.
+        unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), _mm_add_epi8(sextets, offsets)) };
+
+        if N > 16 {
+            crate::driver::spread(out, split, 16);
+        }
+    }
 }
 
 /// `value` through an empty assembly block the compiler cannot see into, yet
-/// can hoist out of a loop since it is pure.
-#[cfg(not(miri))]
+/// can hoist out of a loop since it is pure; as is under Miri, which runs no
+/// assembly.
 #[inline]
 #[target_feature(enable = "ssse3")]
+#[cfg_attr(miri, allow(unused_mut))]
 pub(crate) fn opaque(mut value: __m128i) -> __m128i {
+    #[cfg(not(miri))]
     // SAFETY: the empty template touches nothing but its register.
     unsafe {
         core::arch::asm!(
@@ -232,14 +231,6 @@ pub(crate) fn opaque(mut value: __m128i) -> __m128i {
         )
     };
 
-    value
-}
-
-/// `value`, since Miri runs no assembly.
-#[cfg(miri)]
-#[inline]
-#[target_feature(enable = "ssse3")]
-pub(crate) fn opaque(value: __m128i) -> __m128i {
     value
 }
 
@@ -268,14 +259,14 @@ mod tests {
         check_encode_kernel(
             4,
             |window: &[u8; 16], split, out: &mut [MaybeUninit<u8>; 18]| unsafe {
-                encode(window, split, out)
+                encode(window, split, [out])
             },
         );
         // SAFETY: SSSE3 was detected above.
         check_encode_kernel(
             0,
             |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18]| unsafe {
-                encode(bytes, split, out)
+                encode(bytes, split, [out])
             },
         );
     }

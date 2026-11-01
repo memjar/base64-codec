@@ -6,10 +6,11 @@
 //! [`encode`] and [`decode`] hold the API: [`Base64Encode`] and
 //! [`Base64Decode`] take the caller's input and output buffers chunk by
 //! chunk, as any I/O-free coroutine does; the one-shot functions decode a
-//! whole input in one run when it ends as usual, and encode it in a pass of
-//! their own, with no carry to keep. Every call runs the backend a
-//! [`Base64Cpu`] token from [`cpu`] names: the library never detects CPU
-//! features itself, the application does it once and passes the token down.
+//! whole input in whole lines and one run when it ends as usual, and encode
+//! it in a pass of their own, with no carry to keep. Every call runs the
+//! backend a [`Base64Cpu`] token from [`cpu`] names: the library never
+//! detects CPU features itself, the application does it once and passes the
+//! token down.
 //!
 //! The scalar steps are the reference, and the only code that handles
 //! anything but whole quanta of alphabet characters: padding, skipped and

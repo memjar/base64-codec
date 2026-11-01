@@ -19,15 +19,46 @@ use crate::scalar::ALPHABET;
 
 /// Every character below 128 mapped to its sextet, or to 128 outside the
 /// alphabet, in two halves of 64.
-static DECODE: [[u8; 64]; 2] = decode_table();
+static DECODE: [[u8; 64]; 2] = {
+    let mut table = [[128; 64]; 2];
+    let mut sextet = 0;
+
+    while sextet < 64 {
+        let ch = ALPHABET[sextet] as usize;
+        table[ch / 64][ch % 64] = sextet as u8;
+        sextet += 1;
+    }
+
+    table
+};
 
 /// The byte of `quads` each of the 48 decoded bytes comes from: the three low
 /// bytes of each 32-bit lane, highest first.
-static PACK: [u8; 64] = pack_table();
+static PACK: [u8; 64] = {
+    let mut table = [0; 64];
+    let mut at = 0;
+
+    while at < 48 {
+        table[at] = (at / 3 * 4 + 2 - at % 3) as u8;
+        at += 1;
+    }
+
+    table
+};
 
 /// The byte of the input each byte of the spread comes from: the three bytes
 /// of each group spread over a 32-bit lane as `[b, a, c, b]`.
-static SPREAD: [u8; 64] = spread_table();
+static SPREAD: [u8; 64] = {
+    let mut table = [0; 64];
+    let mut at = 0;
+
+    while at < 64 {
+        table[at] = (at / 4 * 3 + [1, 0, 2, 1][at % 4]) as u8;
+        at += 1;
+    }
+
+    table
+};
 
 base64_driver!(
     #[target_feature(enable = "avx512vbmi")]
@@ -115,42 +146,47 @@ fn decode<const C: usize, const N: usize>(
     bad
 }
 
-/// Encodes 48 bytes into 64 characters, from the first 48 of a window of 64
-/// or from the group alone; given room beyond 64, a line ending fills it at
-/// `split` when not past 64, the characters from `split` on moved past it.
+/// Encodes the `K` groups of 48 bytes `bytes` holds 48 bytes apart into 64
+/// characters each, from the first 48 of windows of 64 or from a lone group;
+/// given room beyond 64, a line ending fills it at `split` when not past 64,
+/// the characters from `split` on moved past it.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
-fn encode<const W: usize, const N: usize>(
-    window: &[u8; W],
+fn encode<const S: usize, const N: usize, const K: usize>(
+    bytes: &[u8; S],
     split: usize,
-    out: &mut [MaybeUninit<u8>; N],
+    outs: [&mut [MaybeUninit<u8>; N]; K],
 ) {
-    const { assert!((W == 48 || W == 64) && N >= 64) };
+    const { assert!(matches!(S - 48 * (K - 1), 48 | 64) && N >= 64) };
 
-    let bytes = if W < 64 {
-        // SAFETY: the loads read the 48 bytes of `window`.
+    for (group, out) in outs.into_iter().enumerate() {
+        let at = 48 * group;
+
+        let bytes = if S - 48 * (K - 1) == 48 {
+            // SAFETY: the loads read 48 bytes of `bytes`, as asserted above.
+            unsafe {
+                _mm512_inserti32x4::<2>(
+                    _mm512_castsi256_si512(_mm256_loadu_si256(bytes.as_ptr().add(at).cast())),
+                    _mm_loadu_si128(bytes.as_ptr().add(at + 32).cast()),
+                )
+            }
+        } else {
+            // SAFETY: the load reads 64 bytes of `bytes`, as asserted above.
+            unsafe { _mm512_loadu_si512(bytes.as_ptr().add(at).cast()) }
+        };
+
+        let chars = encode_vector(bytes);
+
+        // SAFETY: the stores write the first and the last 64 bytes of `out`.
         unsafe {
-            _mm512_inserti32x4::<2>(
-                _mm512_castsi256_si512(_mm256_loadu_si256(window.as_ptr().cast())),
-                _mm_loadu_si128(window.as_ptr().add(32).cast()),
-            )
-        }
-    } else {
-        // SAFETY: the load reads the 64 bytes of `window`.
-        unsafe { _mm512_loadu_si512(window.as_ptr().cast()) }
-    };
+            _mm512_storeu_si512(out.as_mut_ptr().cast(), chars);
 
-    let chars = encode_vector(bytes);
-
-    // SAFETY: the stores write the first and the last 64 bytes of `out`.
-    unsafe {
-        _mm512_storeu_si512(out.as_mut_ptr().cast(), chars);
-
-        if N > 64 && split <= 64 {
-            let from = u64::MAX << (split - (N - 64));
-            let ends = _mm512_set1_epi16(if N == 66 { 0x0a0d } else { 0x0a0a });
-            let chars = _mm512_mask_blend_epi8(from & u64::MAX >> (64 - split), chars, ends);
-            _mm512_mask_storeu_epi8(out.as_mut_ptr().add(N - 64).cast(), from, chars);
+            if N > 64 && split <= 64 {
+                let from = u64::MAX << (split - (N - 64));
+                let ends = _mm512_set1_epi16(if N == 66 { 0x0a0d } else { 0x0a0a });
+                let chars = _mm512_mask_blend_epi8(from & u64::MAX >> (64 - split), chars, ends);
+                _mm512_mask_storeu_epi8(out.as_mut_ptr().add(N - 64).cast(), from, chars);
+            }
         }
     }
 }
@@ -230,43 +266,6 @@ fn mask(len: usize) -> u64 {
     (1 << len) - 1
 }
 
-const fn decode_table() -> [[u8; 64]; 2] {
-    let mut table = [[128; 64]; 2];
-    let mut sextet = 0;
-
-    while sextet < 64 {
-        let ch = ALPHABET[sextet] as usize;
-        table[ch / 64][ch % 64] = sextet as u8;
-        sextet += 1;
-    }
-
-    table
-}
-
-const fn pack_table() -> [u8; 64] {
-    let mut table = [0; 64];
-    let mut at = 0;
-
-    while at < 48 {
-        table[at] = (at / 3 * 4 + 2 - at % 3) as u8;
-        at += 1;
-    }
-
-    table
-}
-
-const fn spread_table() -> [u8; 64] {
-    let mut table = [0; 64];
-    let mut at = 0;
-
-    while at < 64 {
-        table[at] = (at / 4 * 3 + [1, 0, 2, 1][at % 4]) as u8;
-        at += 1;
-    }
-
-    table
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{avx512::*, scalar::*};
@@ -293,14 +292,14 @@ mod tests {
         check_encode_kernel(
             0,
             |window: &[u8; 64], split, out: &mut [MaybeUninit<u8>; 66]| unsafe {
-                encode(window, split, out)
+                encode(window, split, [out])
             },
         );
         // SAFETY: AVX-512 VBMI was detected above.
         check_encode_kernel(
             0,
             |bytes: &[u8; 48], split, out: &mut [MaybeUninit<u8>; 66]| unsafe {
-                encode(bytes, split, out)
+                encode(bytes, split, [out])
             },
         );
     }

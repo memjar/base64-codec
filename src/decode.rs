@@ -89,11 +89,10 @@ impl Base64Decode {
     }
 
     /// Decodes as much of `src` as fits in `dst`, returning the bytes read
-    /// and written: whole lines where a line of `LINE` characters starts,
-    /// runs of whole quanta, the line breaks between them, and anything else
-    /// byte by byte until the runs can take over.
+    /// and written: whole lines and runs of whole quanta, the line breaks
+    /// between them, and anything else byte by byte until the runs can take
+    /// over.
     fn run(&mut self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
-        let loops = self.cpu.loops();
         let state = &mut self.state;
         let (end, padded) = scalar::trimmed(src);
         let mut read = 0;
@@ -102,37 +101,16 @@ impl Base64Decode {
         loop {
             if state.pending == 0 && !state.padded {
                 let end = end.max(read);
-
-                if state.line_start
-                    && end - read > LINE
-                    && let eol @ 1.. = scalar::eol(&src[read + LINE..])
-                {
-                    // SAFETY: the token names a backend the CPU supports.
-                    let lines = unsafe {
-                        (loops.decode_lines[eol - 1])(&src[read..end], &mut dst[written..])
-                    };
-                    read += lines * (LINE + eol);
-                    written += lines * LINE_BYTES;
-                }
-
-                // SAFETY: the token names a backend the CPU supports.
-                let chars = unsafe { (loops.decode_run)(&src[read..end], &mut dst[written..]) };
-                read += chars;
-                written += chars / 4 * 3;
+                let (more_read, more_written) =
+                    lines_and_run(self.cpu, &src[read..end], &mut dst[written..]);
+                read += more_read;
+                written += more_written;
 
                 if end - read < 4 && scalar::decode_tail(state, &src[read..end], padded) {
-                    state.line_start = match src[read..].last() {
-                        Some(last) => *last == b'\n',
-                        None => state.line_start && chars == 0,
-                    };
-
                     return (src.len(), written);
                 }
 
-                let eol = scalar::eol(&src[read..]);
-                state.line_start = eol > 0 || state.line_start && chars == 0;
-
-                if eol > 0 {
+                if let eol @ 1.. = scalar::eol(&src[read..]) {
                     read += eol;
                     continue;
                 }
@@ -191,37 +169,28 @@ pub fn decode_vec(src: &[u8], out: &mut Vec<u8>, cpu: Base64Cpu) -> bool {
 /// The most bytes [`decode`] writes for an input of `len` bytes, whatever
 /// they hold.
 pub const fn decoded_len_max(len: usize) -> usize {
-    len / 4 * 3 + len % 4 * 3 / 4
+    len - len.div_ceil(4)
 }
 
-/// [`decode`] into a `dst` sized by [`decoded_len_max`]: an input not wrapped
-/// in lines of `LINE` characters in one run when it ends as usual, anything
-/// else by a decoder from where the run stopped.
+/// [`decode`] into a `dst` sized by [`decoded_len_max`]: whole lines and one
+/// run when the input ends as usual, anything else by a decoder from where
+/// they stopped.
 fn decode_all(src: &[u8], dst: &mut [MaybeUninit<u8>], cpu: Base64Cpu) -> Base64DecodeOutput {
+    let (end, _) = scalar::trimmed(src);
+    let (read, mut written) = lines_and_run(cpu, &src[..end], dst);
     let mut state = DecodeState::new();
-    let mut read = 0;
 
-    if !matches!(src.get(LINE), Some(b'\r' | b'\n')) {
-        let (end, _) = scalar::trimmed(src);
+    if end - read < 4 && scalar::decode_tail(&mut state, &src[read..end], false) {
+        let tail = scalar::decode_finish(&mut state, &mut dst[written..]).unwrap_or(0);
 
-        // SAFETY: the token names a backend the CPU supports.
-        read = unsafe { (cpu.loops().decode_run)(&src[..end], dst) };
-        state.line_start = read == 0;
-
-        if end - read < 4 && scalar::decode_tail(&mut state, &src[read..end], false) {
-            let written = read / 4 * 3;
-            let tail = scalar::decode_finish(&mut state, &mut dst[written..]).unwrap_or(0);
-
-            return Base64DecodeOutput {
-                read: src.len(),
-                written: written + tail,
-                clean: state.clean,
-            };
-        }
+        return Base64DecodeOutput {
+            read: src.len(),
+            written: written + tail,
+            clean: state.clean,
+        };
     }
 
     let mut decoder = Base64Decode { cpu, state };
-    let mut written = read / 4 * 3;
     let (more_read, more_written) = decoder.run(&src[read..], &mut dst[written..]);
     written += more_written;
     let end = scalar::decode_finish(&mut decoder.state, &mut dst[written..]).unwrap_or(0);
@@ -231,6 +200,28 @@ fn decode_all(src: &[u8], dst: &mut [MaybeUninit<u8>], cpu: Base64Cpu) -> Base64
         written: written + end,
         clean: decoder.state.clean,
     }
+}
+
+/// Decodes whole lines when `src` starts with a line of `LINE` characters,
+/// then one run, returning the bytes read and written.
+#[inline(always)]
+fn lines_and_run(cpu: Base64Cpu, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
+    let loops = cpu.loops();
+
+    if let Some(b'\r' | b'\n') = src.get(LINE)
+        && let eol @ 1.. = scalar::eol(&src[LINE..])
+    {
+        // SAFETY: the token names a backend the CPU supports.
+        let lines = unsafe { (loops.decode_lines[eol - 1])(src, dst) };
+        let (read, written) = (lines * (LINE + eol), lines * LINE_BYTES);
+        // SAFETY: as above.
+        let chars = unsafe { (loops.decode_run)(&src[read..], &mut dst[written..]) };
+        return (read + chars, written + chars / 4 * 3);
+    }
+
+    // SAFETY: as above.
+    let chars = unsafe { (loops.decode_run)(src, dst) };
+    (chars, chars / 4 * 3)
 }
 
 #[cfg(test)]

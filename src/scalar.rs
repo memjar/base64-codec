@@ -34,15 +34,59 @@ const BLANK: u8 = 66;
 const BAD: u8 = 67;
 
 /// Every byte's sextet, or its class when outside the alphabet.
-static CLASSES: [u8; 256] = classes();
+static CLASSES: [u8; 256] = {
+    let mut classes = [BAD; 256];
+    let mut sextet = 0;
+
+    while sextet < 64 {
+        classes[ALPHABET[sextet] as usize] = sextet as u8;
+        sextet += 1;
+    }
+
+    classes[b'=' as usize] = PAD;
+    classes[b'\n' as usize] = NEWLINE;
+    classes[b'\r' as usize] = BLANK;
+    classes[b' ' as usize] = BLANK;
+    classes[b'\t' as usize] = BLANK;
+    classes
+};
 
 /// Every byte's sextet in place in the bytes of a quantum, one table per
 /// position: the lookups of its four characters joined are the quantum's
 /// bytes, with the highest byte set for a byte outside the alphabet.
-static QUANTA: [[u32; 256]; 4] = quanta();
+///
+/// A sextet sits in the quantum's 24 bits, the first one highest, shifted up a
+/// byte and swapped so that the first byte comes first.
+static QUANTA: [[u32; 256]; 4] = {
+    let mut quanta = [[0xff00_0000; 256]; 4];
+    let mut sextet = 0;
+
+    while sextet < 64 {
+        let mut at = 0;
+
+        while at < 4 {
+            quanta[at][ALPHABET[sextet] as usize] = ((sextet as u32) << (26 - 6 * at)).swap_bytes();
+            at += 1;
+        }
+
+        sextet += 1;
+    }
+
+    quanta
+};
 
 /// The characters of every pair of sextets, the first one high.
-static PAIRS: [[u8; 2]; 4096] = pairs();
+static PAIRS: [[u8; 2]; 4096] = {
+    let mut pairs = [[0; 2]; 4096];
+    let mut at = 0;
+
+    while at < 4096 {
+        pairs[at] = [ALPHABET[at >> 6], ALPHABET[at & 63]];
+        at += 1;
+    }
+
+    pairs
+};
 
 base64_driver!(
     decode(
@@ -71,8 +115,6 @@ pub(crate) struct DecodeState {
     pub(crate) padded: bool,
     /// Whether everything read so far was well-formed.
     pub(crate) clean: bool,
-    /// Whether the next byte starts a line.
-    pub(crate) line_start: bool,
 }
 
 impl DecodeState {
@@ -82,7 +124,6 @@ impl DecodeState {
             pending: 0,
             padded: false,
             clean: true,
-            line_start: true,
         }
     }
 }
@@ -152,10 +193,10 @@ pub(crate) fn decode_bytes(
         mut pending,
         mut padded,
         mut clean,
-        mut line_start,
     } = *state;
 
     let mut written = 0;
+    let mut line_start = false;
 
     let (read, done) = 'bytes: {
         for (read, &byte) in src.iter().enumerate() {
@@ -209,7 +250,6 @@ pub(crate) fn decode_bytes(
         pending,
         padded,
         clean,
-        line_start,
     };
 
     (read, written, done)
@@ -441,18 +481,20 @@ fn decode_block<const C: usize, const N: usize>(
     Bad(bad)
 }
 
-/// Encodes 12 bytes into 16 characters; given room beyond 16, a line ending
-/// at `split`, as `spread` writes it.
+/// Encodes the `K` groups of 12 bytes of `bytes` into 16 characters each;
+/// given room beyond 16, a line ending at `split`, as `spread` writes it.
 #[inline]
-fn encode_block<const W: usize, const N: usize>(
-    bytes: &[u8; W],
+fn encode_block<const S: usize, const N: usize, const K: usize>(
+    bytes: &[u8; S],
     split: usize,
-    out: &mut [MaybeUninit<u8>; N],
+    outs: [&mut [MaybeUninit<u8>; N]; K],
 ) {
-    encode_groups(bytes, &mut out[..16]);
+    for (group, out) in bytes.as_chunks::<12>().0.iter().zip(outs) {
+        encode_groups(group, &mut out[..16]);
 
-    if N > 16 {
-        crate::driver::spread(out, split, 16);
+        if N > 16 {
+            crate::driver::spread(out, split, 16);
+        }
     }
 }
 
@@ -531,56 +573,6 @@ fn flush(bits: u32, pending: u8, out: &mut [MaybeUninit<u8>]) -> Option<usize> {
         (2 | 3, _) => None,
         _ => Some(0),
     }
-}
-
-const fn classes() -> [u8; 256] {
-    let mut classes = [BAD; 256];
-    let mut sextet = 0;
-
-    while sextet < 64 {
-        classes[ALPHABET[sextet] as usize] = sextet as u8;
-        sextet += 1;
-    }
-
-    classes[b'=' as usize] = PAD;
-    classes[b'\n' as usize] = NEWLINE;
-    classes[b'\r' as usize] = BLANK;
-    classes[b' ' as usize] = BLANK;
-    classes[b'\t' as usize] = BLANK;
-    classes
-}
-
-/// The quanta tables: a sextet's bits in place in the quantum's 24 bits, the
-/// first one highest, shifted up a byte and swapped so that the first byte
-/// comes first.
-const fn quanta() -> [[u32; 256]; 4] {
-    let mut quanta = [[0xff00_0000; 256]; 4];
-    let mut sextet = 0;
-
-    while sextet < 64 {
-        let mut at = 0;
-
-        while at < 4 {
-            quanta[at][ALPHABET[sextet] as usize] = ((sextet as u32) << (26 - 6 * at)).swap_bytes();
-            at += 1;
-        }
-
-        sextet += 1;
-    }
-
-    quanta
-}
-
-const fn pairs() -> [[u8; 2]; 4096] {
-    let mut pairs = [[0; 2]; 4096];
-    let mut at = 0;
-
-    while at < 4096 {
-        pairs[at] = [ALPHABET[at >> 6], ALPHABET[at & 63]];
-        at += 1;
-    }
-
-    pairs
 }
 
 /// Checks a decode kernel given a block and 2 characters more, returning the
@@ -696,7 +688,12 @@ mod tests {
             out.copy_from_slice(&wide[..12]);
             read
         });
-        check_encode_kernel(0, encode_block::<12, 18>);
+        check_encode_kernel(
+            0,
+            |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18]| {
+                encode_block(bytes, split, [out])
+            },
+        );
     }
 
     fn run(bad: Bad) -> usize {
