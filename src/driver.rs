@@ -14,11 +14,21 @@
 //!
 //! - The decode kernel fills its output: the bytes of its block, then as many
 //!   spare bytes as the invocation names when the output has room for them.
+//!   Given more characters than a block, it stitches its block from the
+//!   characters before `split` and those as far past them as it was given
+//!   more, which leaves out a line break.
 //! - The encode kernel reads its input: a window of the length the invocation
 //!   names, its group starting at the lead, so that it can load bytes around
-//!   it, or the group alone, for the blocks no window fits around.
+//!   it, or the group alone, for the blocks no window fits around. Given more
+//!   room than its characters, it writes those from `split` on as far past as
+//!   it was given more, which leaves room for a line ending.
 //!
-//! A run or a line ends with a block ending at its end and overlapping the one
+//! Lines of 76 characters go a period at a time: the lines whose characters
+//! make 19 blocks, 76 being 4 times 19, each block's place known at compile
+//! time, a block across a line break decoded from its two lines stitched and
+//! encoded with its characters past the line moved past the line break. Fewer
+//! lines than a period, and those past the whole periods, go line by line. A
+//! run or a line ends with a block ending at its end and overlapping the one
 //! before, which is harmless since a quantum decodes to the same bytes
 //! wherever it falls; a run shorter than one block goes to the narrower loop
 //! the invocation names.
@@ -42,9 +52,10 @@ pub(crate) struct Loops {
     /// that fit in `dst`, up to the first other byte, returning the
     /// characters read.
     pub(crate) decode_run: unsafe fn(&[u8], &mut [MaybeUninit<u8>]) -> usize,
-    /// Decodes whole lines of the given width, ended by CRLF or by LF alone,
-    /// while they are well formed and fit in `dst`, returning how many.
-    pub(crate) decode_lines: unsafe fn(&[u8], &mut [MaybeUninit<u8>], usize, bool) -> usize,
+    /// Decodes whole lines of `LINE` characters, ended by CRLF or by LF
+    /// alone, while they are well formed and fit in `dst`, returning how
+    /// many.
+    pub(crate) decode_lines: unsafe fn(&[u8], &mut [MaybeUninit<u8>], bool) -> usize,
     /// Encodes the whole groups at the start of `src` that fit in `dst`,
     /// returning the bytes read.
     pub(crate) encode_run: unsafe fn(&[u8], &mut [MaybeUninit<u8>]) -> usize,
@@ -59,6 +70,48 @@ pub(crate) fn uninit(dst: &mut [u8]) -> &mut [MaybeUninit<u8>] {
     // ever writes initialised bytes through the result, so `dst` stays
     // initialised.
     unsafe { &mut *(dst as *mut [u8] as *mut [MaybeUninit<u8>]) }
+}
+
+/// The mask of a block stitched at `split`, at most 32: its bytes from the
+/// split on are set.
+pub(crate) fn stitch(split: usize) -> &'static [u8] {
+    static MASKS: [[u8; 32]; 2] = [[0; 32], [0xff; 32]];
+    &MASKS.as_flattened()[32 - split..]
+}
+
+/// Moves the characters of `out` from `split` to `chars` past the line
+/// ending that fills the rest of `out`, a quantum at a time from the last,
+/// for the kernels with no masked store.
+#[inline]
+pub(crate) fn spread(out: &mut [MaybeUninit<u8>], split: usize, chars: usize) {
+    let gap = out.len() - chars;
+
+    for at in (split..chars).step_by(4).rev() {
+        let Some(&quantum) = out[at..].first_chunk::<4>() else {
+            return;
+        };
+
+        if let Some(slot) = out[at + gap..].first_chunk_mut() {
+            *slot = quantum;
+        }
+    }
+}
+
+/// Expands `$body` once per block of a period, its index `$block` a constant
+/// from 0 to 18.
+///
+/// NOTE: written out rather than looped, as LLVM rolls the 19 blocks back
+/// into a loop, which then works each block's place out at run time.
+macro_rules! base64_period {
+    ($block:ident => $body:block) => {
+        base64_period!(@ $block $body 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)
+    };
+    (@ $block:ident $body:block $($index:literal)*) => {
+        $({
+            const $block: usize = $index;
+            $body
+        })*
+    };
 }
 
 /// Stamps a backend's `LOOPS` from its kernels: for decoding, the characters
@@ -143,7 +196,7 @@ macro_rules! base64_driver {
                         return at;
                     };
 
-                    let found = $decode(chars, bytes);
+                    let found = $decode(chars, WIDE, bytes);
 
                     if Bad::EAGER && found.any() {
                         break 'groups;
@@ -163,13 +216,13 @@ macro_rules! base64_driver {
                 let start = at.min(chars - WIDE);
 
                 let (Some(block), Some(bytes)) = (
-                    src[start..].first_chunk(),
+                    src[start..].first_chunk::<WIDE>(),
                     dst[start / 4 * 3..].first_chunk_mut::<BYTES>(),
                 ) else {
                     return at;
                 };
 
-                let bad = $decode(block, bytes);
+                let bad = $decode(block, WIDE, bytes);
 
                 if bad.any() {
                     return start + bad.first();
@@ -181,70 +234,75 @@ macro_rules! base64_driver {
             chars
         }
 
-        /// Decodes whole lines of `width` characters, ended by CRLF or by LF
+        /// Decodes whole lines of `LINE` characters, ended by CRLF or by LF
         /// when `crlf` is false, while they are well formed and `dst` has
         /// room for the spare bytes past them, returning how many.
         $(#[$attr])*
-        #[inline(never)]
-        fn decode_lines(
-            src: &[u8],
-            dst: &mut [core::mem::MaybeUninit<u8>],
-            width: usize,
-            crlf: bool,
-        ) -> usize {
-            match width {
-                crate::scalar::LINE => decode_lines_of::<{ crate::scalar::LINE }>(src, dst, width, crlf),
-                $chars.. => decode_lines_of::<0>(src, dst, width, crlf),
-                _ => 0,
+        fn decode_lines(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>], crlf: bool) -> usize {
+            const LINES: usize = $chars / 4;
+
+            match crlf {
+                true => decode_lines_of::<{ $chars + 2 }, { LINES * 78 }>(src, dst),
+                false => decode_lines_of::<{ $chars + 1 }, { LINES * 77 }>(src, dst),
             }
         }
 
-        /// `decode_lines` in blocks writing spare bytes, the last one ending
-        /// at the line's end, tested once per line unless the backend tests
-        /// each block apart.
+        /// `decode_lines` with the `C - $chars` bytes of CRLF or LF ending
+        /// each line, `SPAN` bytes a period: by `decode_periods` when there
+        /// are lines enough for a period, with blocks of 32 characters or
+        /// more, line by line otherwise, blocks writing spare bytes, the last
+        /// one ending at the line's end, tested once per line unless the
+        /// backend tests each block apart.
         ///
-        /// NOTE: `WIDTH` is the width when it is known at compile time, 0
-        /// otherwise, so that the common width compiles with its blocks
-        /// unrolled and their bounds checked away.
+        /// NOTE: with blocks of 16 characters, the periods measured no faster
+        /// than the lines for SSSE3 and 200 cycles a call slower for scalar.
         $(#[$attr])*
-        #[inline]
-        fn decode_lines_of<const WIDTH: usize>(
+        #[inline(never)]
+        fn decode_lines_of<const C: usize, const SPAN: usize>(
             src: &[u8],
             dst: &mut [core::mem::MaybeUninit<u8>],
-            width: usize,
-            crlf: bool,
         ) -> usize {
             const WIDE: usize = $chars;
+            const LINE: usize = crate::scalar::LINE;
+            const LINES: usize = WIDE / 4;
+            const LEN: usize = crate::scalar::LINE_BYTES;
 
-            let width = if WIDTH == 0 { width } else { WIDTH };
-            let len = width / 4 * 3;
+            let span = SPAN / LINES;
+            let eol = &b"\r\n"[2 + WIDE - C..];
+            let lines = (src.len() / span).min(dst.len().saturating_sub($spare) / LEN);
+
+            if WIDE >= 32 && lines >= LINES {
+                return decode_periods::<C, SPAN>(src, dst, lines);
+            }
+
             let mut done = 0;
 
-            for line in src.chunks_exact(width + 1 + crlf as usize) {
-                let (chars, end) = line.split_at(width);
-
-                let Some(out) = dst.get_mut(done * len..done * len + len + $spare) else {
+            for line in 0..lines {
+                let (Some(chars), Some(out)) = (
+                    src.get(line * span..line * span + span),
+                    dst.get_mut(line * LEN..line * LEN + LEN + $spare),
+                ) else {
                     break;
                 };
 
-                if end.last() != Some(&b'\n') || crlf && end[0] != b'\r' {
+                if chars.get(LINE..span) != Some(eol) {
                     break;
                 }
 
                 let mut bad = Bad::none();
                 let mut at = 0;
 
-                while at < width {
-                    let start = at.min(width - WIDE);
+                while at < LINE {
+                    let start = at.min(LINE - WIDE);
 
                     let (Some(block), Some(bytes)) = (
-                        chars[start..].first_chunk(),
+                        chars[start..].first_chunk::<WIDE>(),
                         out[start / 4 * 3..].first_chunk_mut::<{ WIDE / 4 * 3 + $spare }>(),
                     ) else {
                         return done;
                     };
 
-                    let found = $decode(block, bytes);
+                    let found = $decode(block, WIDE, bytes);
 
                     if Bad::EAGER && found.any() {
                         return done;
@@ -262,6 +320,76 @@ macro_rules! base64_driver {
             }
 
             done
+        }
+
+        /// `decode_lines_of` over the first `lines` lines of `src`, in whole
+        /// periods of `$chars / 4` lines, `SPAN` bytes, each the 19 blocks of
+        /// its characters, a block across a line break stitched from its two
+        /// lines, tested once per period unless the backend tests each block
+        /// apart, then by `decode_lines_of` the lines past them, or those of
+        /// a period that failed.
+        $(#[$attr])*
+        #[inline(never)]
+        fn decode_periods<const C: usize, const SPAN: usize>(
+            src: &[u8],
+            dst: &mut [core::mem::MaybeUninit<u8>],
+            lines: usize,
+        ) -> usize {
+            const WIDE: usize = $chars;
+            const BYTES: usize = WIDE / 4 * 3;
+            const LINE: usize = crate::scalar::LINE;
+            const LINES: usize = WIDE / 4;
+            const LEN: usize = crate::scalar::LINE_BYTES;
+
+            let span = SPAN / LINES;
+            let eol = &b"\r\n"[2 + WIDE - C..];
+            let (periods, _) = src[..lines * span].as_chunks::<SPAN>();
+            let mut done = 0;
+
+            'periods: for chars in periods {
+                let Some(out) = dst[done * LEN..].first_chunk_mut::<{ LINES * LEN + $spare }>() else {
+                    break 'periods;
+                };
+
+                for line in 0..LINES {
+                    if chars[line * span + LINE..][..eol.len()] != *eol {
+                        break 'periods;
+                    }
+                }
+
+                let mut bad = Bad::none();
+
+                base64_period!(BLOCK => {
+                    let at = BLOCK * WIDE;
+                    let (from, split) = (at + at / LINE * eol.len(), (LINE - at % LINE).min(WIDE));
+
+                    let (Some(window), Some(bytes)) = (
+                        chars[from..].first_chunk::<C>(),
+                        out[BLOCK * BYTES..].first_chunk_mut::<{ BYTES + $spare }>(),
+                    ) else {
+                        break 'periods;
+                    };
+
+                    let found = $decode(window, split, bytes);
+
+                    if Bad::EAGER && found.any() {
+                        break 'periods;
+                    }
+
+                    bad = bad.join(found);
+                });
+
+                if !Bad::EAGER && bad.any() {
+                    break;
+                }
+
+                done += LINES;
+            }
+
+            // NOTE: the lines of a period that failed but its last go line by
+            // line, which stops at the line at fault.
+            let rest = (lines - done).min(LINES - 1);
+            done + decode_lines_of::<C, SPAN>(&src[done * span..(done + rest) * span], &mut dst[done * LEN..])
         }
 
         /// Encodes the whole groups at the start of `src` that fit in `dst`,
@@ -293,11 +421,11 @@ macro_rules! base64_driver {
             let bytes = src.len();
             let dst = &mut dst[..bytes / 3 * 4];
 
-            let (Some(group), Some(chars)) = (src.first_chunk::<BYTES>(), dst.first_chunk_mut()) else {
+            let (Some(group), Some(chars)) = (src.first_chunk::<BYTES>(), dst.first_chunk_mut::<CHARS>()) else {
                 return 0;
             };
 
-            $encode(group, chars);
+            $encode(group, CHARS, chars);
             let mut at = BYTES;
             let (steps, _) = dst[CHARS..].as_chunks_mut::<{ crate::driver::ENCODE_UNROLL * CHARS }>();
 
@@ -313,7 +441,7 @@ macro_rules! base64_driver {
                         return at;
                     };
 
-                    $encode(window, chars);
+                    $encode(window, CHARS, chars);
                 }
 
                 at += STEP;
@@ -323,9 +451,9 @@ macro_rules! base64_driver {
                 let start = at.min(bytes - BYTES);
                 let window = start.checked_sub($lead).and_then(|lead| src[lead..].first_chunk::<$window>());
 
-                match (window, src[start..].first_chunk::<BYTES>(), dst[start / 3 * 4..].first_chunk_mut()) {
-                    (Some(window), _, Some(chars)) => $encode(window, chars),
-                    (None, Some(group), Some(chars)) => $encode(group, chars),
+                match (window, src[start..].first_chunk::<BYTES>(), dst[start / 3 * 4..].first_chunk_mut::<CHARS>()) {
+                    (Some(window), _, Some(chars)) => $encode(window, CHARS, chars),
+                    (None, Some(group), Some(chars)) => $encode(group, CHARS, chars),
                     _ => return at,
                 }
 
@@ -338,62 +466,118 @@ macro_rules! base64_driver {
         /// Encodes the whole lines of `src` that fit in `dst`, each ended by
         /// `eol`, returning how many.
         $(#[$attr])*
-        #[inline(never)]
-        fn encode_lines(
-            src: &[u8],
-            dst: &mut [core::mem::MaybeUninit<u8>],
-            eol: &[u8],
-        ) -> usize {
+        fn encode_lines(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>], eol: &[u8]) -> usize {
+            const LINES: usize = $bytes / 3;
+            const CHARS: usize = $bytes / 3 * 4;
+
             match eol.len() {
-                2 => encode_lines_of::<2>(src, dst),
-                _ => encode_lines_of::<1>(src, dst),
+                2 => encode_lines_of::<{ CHARS + 2 }, { LINES * 78 }>(src, dst),
+                _ => encode_lines_of::<{ CHARS + 1 }, { LINES * 77 }>(src, dst),
             }
         }
 
-        /// `encode_lines` in blocks, the last one ending at the line's end,
-        /// each line ended by CRLF when `EOL` is 2 and by LF when it is 1.
+        /// `encode_lines` with the `N` less a block's characters bytes of
+        /// CRLF or LF ending each line, `SPAN` bytes a period: by
+        /// `encode_periods` when there are lines enough for a period, line by
+        /// line otherwise, each line's last block ending at its end.
         ///
         /// NOTE: the ending's length is a constant, so that it is written
         /// with plain stores and not a copy call per line.
         $(#[$attr])*
-        #[inline]
-        fn encode_lines_of<const EOL: usize>(
+        #[inline(never)]
+        fn encode_lines_of<const N: usize, const SPAN: usize>(
             src: &[u8],
             dst: &mut [core::mem::MaybeUninit<u8>],
         ) -> usize {
             const BYTES: usize = $bytes;
+            const CHARS: usize = BYTES / 3 * 4;
             const LINE: usize = crate::scalar::LINE;
-            const LINE_BYTES: usize = crate::scalar::LINE_BYTES;
+            const LINES: usize = BYTES / 3;
+            const LEN: usize = crate::scalar::LINE_BYTES;
 
-            let (lines, _) = src.as_chunks::<LINE_BYTES>();
-            let mut done = 0;
+            let span = SPAN / LINES;
+            let eol = &b"\r\n"[2 + CHARS - N..];
+            let lines = (src.len() / LEN).min(dst.len() / span);
 
-            for (line, out) in lines.iter().zip(dst.chunks_exact_mut(LINE + EOL)) {
+            if lines >= LINES {
+                return encode_periods::<N, SPAN>(src, dst, lines);
+            }
+
+            let (whole, _) = src.as_chunks::<LEN>();
+
+            for (line, out) in whole.iter().zip(dst.chunks_exact_mut(span)).take(lines) {
                 let mut at = 0;
 
-                while at < LINE_BYTES {
-                    let start = at.min(LINE_BYTES - BYTES);
+                while at < LEN {
+                    let start = at.min(LEN - BYTES);
 
                     let (Some(group), Some(chars)) = (
                         line[start..].first_chunk::<BYTES>(),
-                        out[start / 3 * 4..].first_chunk_mut(),
+                        out[start / 3 * 4..].first_chunk_mut::<CHARS>(),
                     ) else {
-                        return done;
+                        return 0;
                     };
 
-                    $encode(group, chars);
+                    $encode(group, CHARS, chars);
                     at = start + BYTES;
                 }
 
-                if EOL == 2 {
-                    out[LINE].write(b'\r');
-                }
-
-                out[LINE + EOL - 1].write(b'\n');
-                done += 1;
+                crate::scalar::write_eol(&mut out[LINE..], eol);
             }
 
-            done
+            lines
+        }
+
+        /// `encode_lines_of` over the first `lines` lines of `src`, in whole
+        /// periods of `$bytes / 3` lines, `SPAN` bytes, each the 19 blocks of
+        /// its bytes, reading windows where they fit, the characters of a
+        /// block across a line break past the line moved past it, then the
+        /// lines past them by `encode_lines_of`.
+        $(#[$attr])*
+        #[inline(never)]
+        fn encode_periods<const N: usize, const SPAN: usize>(
+            src: &[u8],
+            dst: &mut [core::mem::MaybeUninit<u8>],
+            lines: usize,
+        ) -> usize {
+            const BYTES: usize = $bytes;
+            const CHARS: usize = BYTES / 3 * 4;
+            const LINE: usize = crate::scalar::LINE;
+            const LINES: usize = BYTES / 3;
+            const LEN: usize = crate::scalar::LINE_BYTES;
+
+            let span = SPAN / LINES;
+            let eol = &b"\r\n"[2 + CHARS - N..];
+            let (periods, _) = src[..lines * LEN].as_chunks::<{ LINES * LEN }>();
+            let (outs, _) = dst.as_chunks_mut::<SPAN>();
+
+            for (bytes, out) in periods.iter().zip(outs) {
+                base64_period!(BLOCK => {
+                    let at = BLOCK * CHARS;
+                    let (to, split) = (at + at / LINE * eol.len(), (LINE - at % LINE).min(CHARS));
+                    let from = BLOCK * BYTES;
+                    let window = from.checked_sub($lead).and_then(|lead| bytes[lead..].first_chunk::<$window>());
+
+                    let (Some(chars), Some(group)) = (
+                        out[to..].first_chunk_mut::<N>(),
+                        bytes[from..].first_chunk::<BYTES>(),
+                    ) else {
+                        return 0;
+                    };
+
+                    match window {
+                        Some(window) => $encode(window, split, chars),
+                        None => $encode(group, split, chars),
+                    }
+                });
+
+                for line in 0..LINES {
+                    crate::scalar::write_eol(&mut out[line * span + LINE..], eol);
+                }
+            }
+
+            let done = periods.len() * LINES;
+            done + encode_lines_of::<N, SPAN>(&src[done * LEN..lines * LEN], &mut dst[done * span..])
         }
     };
 }
@@ -557,20 +741,23 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_byte_at_every_position_matches_the_reference() {
-        let line = reference_encode(&Rng(7).bytes(120), OPTIONS[0]);
+        let run = reference_encode(&Rng(7).bytes(120), OPTIONS[0]);
+        let lines = reference_encode(&Rng(7).bytes(171), OPTIONS[1]);
 
-        for byte in 0..=255 {
-            for at in 0..line.len() {
-                let mut input = line.clone();
-                input[at] = byte;
-                let expected = reference_decode(&input);
+        for line in [run, lines] {
+            for byte in 0..=255 {
+                for at in 0..line.len() {
+                    let mut input = line.clone();
+                    input[at] = byte;
+                    let expected = reference_decode(&input);
 
-                for cpu in available() {
-                    assert_eq!(
-                        one_shot_decode(&input, cpu),
-                        expected,
-                        "{cpu:?} {byte} {at}"
-                    );
+                    for cpu in available() {
+                        assert_eq!(
+                            one_shot_decode(&input, cpu),
+                            expected,
+                            "{cpu:?} {byte} {at}"
+                        );
+                    }
                 }
             }
         }

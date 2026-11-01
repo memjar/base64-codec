@@ -73,18 +73,30 @@ impl Bad {
 
 /// Decodes 32 characters into the first 24 bytes of `out`, by the SSSE3
 /// method over both lanes, and its 4 spare bytes when it holds 28: the 12
-/// bytes of each lane stored apart, or moved together first.
+/// bytes of each lane stored apart, or moved together first. The characters
+/// are the first 32 of `chars`, or when it holds more, its first `split` and
+/// the last ones.
 ///
 /// The low-nibble table holds the classes each low nibble allows, the
 /// complement of the SSSE3 one, and is looked up with the characters as they
 /// are: a character from 128 up looks up zero, which allows nothing.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn decode<const N: usize>(chars: &[u8; 32], out: &mut [MaybeUninit<u8>; N]) -> Bad {
-    const { assert!(N == 24 || N == 28) };
+fn decode<const C: usize, const N: usize>(
+    chars: &[u8; C],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) -> Bad {
+    const { assert!(C >= 32 && (N == 24 || N == 28)) };
 
-    // SAFETY: `chars` holds the 32 bytes the load reads.
-    let chars = unsafe { _mm256_loadu_si256(chars.as_ptr().cast()) };
+    // SAFETY: `chars` holds the 32 bytes each load reads, from its start and
+    // from its end, and the mask the 32 the third one reads.
+    let chars = unsafe {
+        let first = _mm256_loadu_si256(chars.as_ptr().cast());
+        let last = _mm256_loadu_si256(chars.as_ptr().add(C - 32).cast());
+        let mask = crate::driver::stitch(split);
+        _mm256_blendv_epi8(first, last, _mm256_loadu_si256(mask.as_ptr().cast()))
+    };
     let high = _mm256_and_si256(_mm256_srli_epi32::<4>(chars), _mm256_set1_epi8(0x0f));
 
     let allowed = _mm256_shuffle_epi8(
@@ -153,11 +165,17 @@ fn decode<const N: usize>(chars: &[u8; 32], out: &mut [MaybeUninit<u8>; N]) -> B
 
 /// Encodes 24 bytes into 32 characters: from a window of 32, its group from
 /// its fifth byte, in one load landing the 12 bytes of each lane in place, or
-/// from the group alone, its halves loaded into their lanes apart.
+/// from the group alone, its halves loaded into their lanes apart. When `out`
+/// holds more than 32, the characters from `split` on land past the line
+/// ending that fills the rest.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 32]) {
-    const { assert!(W == 24 || W == 32) };
+fn encode<const W: usize, const N: usize>(
+    window: &[u8; W],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) {
+    const { assert!((W == 24 || W == 32) && N >= 32) };
 
     let spread = if W == 32 {
         // SAFETY: `window` holds the 32 bytes the load reads.
@@ -193,22 +211,27 @@ fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 32]) {
         )
     };
 
+    let chars = ascii(sextets(spread));
+
     // SAFETY: `out` holds the 32 bytes the store writes.
-    unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast(), ascii(split(spread))) };
+    unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast(), chars) };
+
+    if N > 32 {
+        crate::driver::spread(out, split, 32);
+    }
 }
 
-/// The 256-bit `split` of the SSSE3 backend.
+/// The 256-bit `sextets` of the SSSE3 backend, its multipliers hidden by the
+/// SSSE3 `opaque` and broadcast.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn split(spread: __m256i) -> __m256i {
-    let first = _mm256_srli_epi16::<10>(_mm256_mullo_epi16(
-        spread,
-        opaque(_mm256_set1_epi32(0x0010_0001)),
-    ));
-
+fn sextets(spread: __m256i) -> __m256i {
+    let low = _mm256_broadcastsi128_si256(crate::ssse3::opaque(_mm_set1_epi32(0x0010_0001)));
+    let high = _mm256_broadcastsi128_si256(crate::ssse3::opaque(_mm_set1_epi32(0x0100_0010)));
+    let first = _mm256_srli_epi16::<10>(_mm256_mullo_epi16(spread, low));
     let second = _mm256_mullo_epi16(
         _mm256_and_si256(spread, _mm256_set1_epi32(0x003f_03f0)),
-        opaque(_mm256_set1_epi32(0x0100_0010)),
+        high,
     );
 
     _mm256_or_si256(first, second)
@@ -233,32 +256,6 @@ fn ascii(sextets: __m256i) -> __m256i {
     _mm256_add_epi8(sextets, offsets)
 }
 
-/// The 256-bit `opaque` of the SSSE3 backend.
-#[cfg(not(miri))]
-#[inline]
-#[target_feature(enable = "avx2")]
-fn opaque(mut value: __m256i) -> __m256i {
-    // SAFETY: the template is empty: it leaves its register as it is, and
-    // touches no other register, no flag and no memory.
-    unsafe {
-        core::arch::asm!(
-            "/* {0} */",
-            inout(ymm_reg) value,
-            options(pure, nomem, nostack, preserves_flags),
-        )
-    };
-
-    value
-}
-
-/// `value` as it is, since Miri runs no assembly.
-#[cfg(miri)]
-#[inline]
-#[target_feature(enable = "avx2")]
-fn opaque(value: __m256i) -> __m256i {
-    value
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{avx2::*, scalar::*};
@@ -270,20 +267,30 @@ mod tests {
         }
 
         // SAFETY: AVX2 was detected above.
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 24]| unsafe {
-            run(decode(chars, out))
+        check_decode_kernel(|chars, split, out| unsafe {
+            run(decode::<34, 24>(chars, split, out))
         });
         // SAFETY: AVX2 was detected above.
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 24]| unsafe {
+        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 24]| unsafe {
             let mut wide = [MaybeUninit::new(0); 28];
-            let read = run(decode(chars, &mut wide));
+            let read = run(decode::<34, 28>(chars, split, &mut wide));
             out.copy_from_slice(&wide[..24]);
             read
         });
         // SAFETY: AVX2 was detected above.
-        check_encode_kernel(4, |window: &[u8; 32], out| unsafe { encode(window, out) });
+        check_encode_kernel(
+            4,
+            |window: &[u8; 32], split, out: &mut [MaybeUninit<u8>; 34]| unsafe {
+                encode(window, split, out)
+            },
+        );
         // SAFETY: AVX2 was detected above.
-        check_encode_kernel(0, |bytes: &[u8; 24], out| unsafe { encode(bytes, out) });
+        check_encode_kernel(
+            0,
+            |bytes: &[u8; 24], split, out: &mut [MaybeUninit<u8>; 34]| unsafe {
+                encode(bytes, split, out)
+            },
+        );
     }
 
     #[target_feature(enable = "avx2")]

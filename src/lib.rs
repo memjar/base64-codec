@@ -17,8 +17,9 @@
 //! backend supplies block kernels, table lookups for scalar and vectors for
 //! SSSE3, AVX2 and AVX-512 on x86 and NEON on aarch64, which one driver,
 //! written once and stamped into each backend under its target features,
-//! runs over runs of whole quanta and over wrapped input line by line. Every
-//! backend writes the same bytes and reports the same flag.
+//! runs over runs of whole quanta and over lines of 76 characters, a period
+//! of lines at a time, its blocks crossing the line breaks. Every backend
+//! writes the same bytes and reports the same flag.
 //!
 //! The SIMD kernels follow encodify 1.0.2 and Wojciech Muła and Daniel
 //! Lemire's methods, the driver's structure simdutf8 0.1.5, as

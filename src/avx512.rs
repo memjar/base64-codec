@@ -85,14 +85,26 @@ impl Bad {
 }
 
 /// Decodes 64 characters into the first 48 bytes of `out`, and its 16 spare
-/// bytes when it holds 64.
+/// bytes when it holds 64: the first 64 of `chars`, or when it holds more,
+/// its first `split` and the last ones.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
-fn decode<const N: usize>(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; N]) -> Bad {
-    const { assert!(N == 48 || N == 64) };
+fn decode<const C: usize, const N: usize>(
+    chars: &[u8; C],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) -> Bad {
+    const { assert!(C >= 64 && (N == 48 || N == 64)) };
 
-    // SAFETY: `chars` holds the 64 bytes the load reads.
-    let (bytes, bad) = decode_vector(unsafe { _mm512_loadu_si512(chars.as_ptr().cast()) });
+    // SAFETY: `chars` holds the 64 bytes each load reads, from its start and
+    // from its end.
+    let chars = unsafe {
+        let first = _mm512_loadu_si512(chars.as_ptr().cast());
+        let last = _mm512_loadu_si512(chars.as_ptr().add(C - 64).cast());
+        _mm512_mask_blend_epi8(!(u64::MAX >> (64 - split)), first, last)
+    };
+
+    let (bytes, bad) = decode_vector(chars);
 
     if N < 64 {
         // SAFETY: `out` holds 48 bytes, the first 32 for the first store and
@@ -113,11 +125,17 @@ fn decode<const N: usize>(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; N]) -> B
 }
 
 /// Encodes 48 bytes into 64 characters: the first 48 of a window of 64, its
-/// last 16 only loaded along, or the group alone.
+/// last 16 only loaded along, or the group alone. When `out` holds more than
+/// 64, the characters from `split` on land past the line ending that fills
+/// the rest.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
-fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 64]) {
-    const { assert!(W == 48 || W == 64) };
+fn encode<const W: usize, const N: usize>(
+    window: &[u8; W],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) {
+    const { assert!((W == 48 || W == 64) && N >= 64) };
 
     let bytes = if W < 64 {
         // SAFETY: `window` holds 48 bytes, the loads read the first 32 and
@@ -133,8 +151,18 @@ fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 64]) {
         unsafe { _mm512_loadu_si512(window.as_ptr().cast()) }
     };
 
-    // SAFETY: `out` holds the 64 bytes the store writes.
-    unsafe { _mm512_storeu_si512(out.as_mut_ptr().cast(), encode_vector(bytes)) };
+    let chars = encode_vector(bytes);
+
+    // SAFETY: `out` holds the 64 bytes the first store writes, and the last
+    // 64 the second one writes from `split` on.
+    unsafe {
+        _mm512_storeu_si512(out.as_mut_ptr().cast(), chars);
+
+        if N > 64 && split < 64 {
+            let to = out.as_mut_ptr().add(N - 64).cast();
+            _mm512_mask_storeu_epi8(to, !(u64::MAX >> (64 - split)), chars);
+        }
+    }
 }
 
 /// Decodes the whole quanta of alphabet characters at the start of `src`
@@ -266,20 +294,30 @@ mod tests {
         }
 
         // SAFETY: AVX-512 VBMI was detected above.
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 48]| unsafe {
-            run(decode(chars, out))
+        check_decode_kernel(|chars, split, out| unsafe {
+            run(decode::<66, 48>(chars, split, out))
         });
         // SAFETY: AVX-512 VBMI was detected above.
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 48]| unsafe {
+        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 48]| unsafe {
             let mut wide = [MaybeUninit::new(0); 64];
-            let read = run(decode(chars, &mut wide));
+            let read = run(decode::<66, 64>(chars, split, &mut wide));
             out.copy_from_slice(&wide[..48]);
             read
         });
         // SAFETY: AVX-512 VBMI was detected above.
-        check_encode_kernel(0, |window: &[u8; 64], out| unsafe { encode(window, out) });
+        check_encode_kernel(
+            0,
+            |window: &[u8; 64], split, out: &mut [MaybeUninit<u8>; 66]| unsafe {
+                encode(window, split, out)
+            },
+        );
         // SAFETY: AVX-512 VBMI was detected above.
-        check_encode_kernel(0, |bytes: &[u8; 48], out| unsafe { encode(bytes, out) });
+        check_encode_kernel(
+            0,
+            |bytes: &[u8; 48], split, out: &mut [MaybeUninit<u8>; 66]| unsafe {
+                encode(bytes, split, out)
+            },
+        );
     }
 
     #[target_feature(enable = "avx512vbmi")]

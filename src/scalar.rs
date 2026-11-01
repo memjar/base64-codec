@@ -27,10 +27,6 @@ pub(crate) const LINE_BYTES: usize = LINE / 4 * 3;
 /// anywhere but at a line start.
 const RESYNC: usize = 64;
 
-/// The narrowest line whose width the decoder learns, to decode the lines
-/// that follow whole.
-const LINE_MIN: usize = 16;
-
 /// The class of `=`, and the lowest of the bytes outside the alphabet.
 const PAD: u8 = 64;
 const NEWLINE: u8 = 65;
@@ -77,9 +73,9 @@ pub(crate) struct DecodeState {
     pub(crate) clean: bool,
     /// Whether the next byte starts a line.
     pub(crate) line_start: bool,
-    /// The width of the lines read so far and whether CRLF ends them, once
-    /// a line was read whole.
-    pub(crate) lines: Option<(usize, bool)>,
+    /// Whether CRLF ends the lines of `LINE` characters read so far, once
+    /// one was read whole.
+    pub(crate) lines: Option<bool>,
 }
 
 impl DecodeState {
@@ -95,9 +91,10 @@ impl DecodeState {
     }
 
     /// Takes the line break at the start of `src`, where a run of `chars`
-    /// characters stopped, returning its length: the width of the lines is
-    /// learnt when the run was a whole line, and the next byte starts a line
-    /// after a line break or after an empty run at a line start.
+    /// characters stopped, returning its length: the line ending is learnt
+    /// when the run was a whole line of `LINE` characters, and the next byte
+    /// starts a line after a line break or after an empty run at a line
+    /// start.
     pub(crate) fn line_break(&mut self, src: &[u8], chars: usize) -> usize {
         let eol = match src {
             [b'\r', b'\n', ..] => 2,
@@ -108,8 +105,8 @@ impl DecodeState {
             }
         };
 
-        if self.line_start && chars >= LINE_MIN {
-            self.lines = Some((chars, eol == 2));
+        if self.line_start && chars == LINE {
+            self.lines = Some(eol == 2);
         }
 
         self.line_start = true;
@@ -446,13 +443,23 @@ impl Bad {
 
 /// Decodes 16 characters into the first 12 bytes of `out`, each quantum
 /// stored as a 32-bit word whose spare byte the next one overwrites, the
-/// last one cut to 3 bytes when `out` has no spare.
+/// last one cut to 3 bytes when `out` has no spare. The characters are the
+/// first 16 of `chars`, or when it holds more, its first `split` and the last
+/// ones.
 #[inline]
-fn decode_block<const N: usize>(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; N]) -> Bad {
+fn decode_block<const C: usize, const N: usize>(
+    chars: &[u8; C],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) -> Bad {
     let (quads, _) = chars.as_chunks::<4>();
     let mut bad = 0;
 
-    for (at, quad) in quads.iter().enumerate() {
+    for (at, mut quad) in quads.iter().take(4).enumerate() {
+        if C > 16 && at * 4 >= split {
+            quad = chars[at * 4 + C - 16..].first_chunk().unwrap_or(quad);
+        }
+
         let word = quantum(quad);
         let len = (N - at * 3).min(4);
         out[at * 3..at * 3 + len].copy_from_slice(&word.to_le_bytes().map(MaybeUninit::new)[..len]);
@@ -462,10 +469,19 @@ fn decode_block<const N: usize>(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; N]
     Bad(bad)
 }
 
-/// Encodes 12 bytes into 16 characters.
+/// Encodes 12 bytes into 16 characters, those from `split` on past the line
+/// ending that fills the rest of `out` when it holds more.
 #[inline]
-fn encode_block(bytes: &[u8; 12], out: &mut [MaybeUninit<u8>; 16]) {
-    encode_groups(bytes, out);
+fn encode_block<const W: usize, const N: usize>(
+    bytes: &[u8; W],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) {
+    encode_groups(bytes, &mut out[..16]);
+
+    if N > 16 {
+        crate::driver::spread(out, split, 16);
+    }
 }
 
 /// Decodes the whole quanta of alphabet characters at the start of `src`
@@ -597,71 +613,91 @@ const fn pairs() -> [[u8; 2]; 4096] {
     pairs
 }
 
-/// Checks a decode kernel, returning the characters it decoded before the
-/// first one outside the alphabet, against `decode_quanta` with every byte
-/// at every position of a valid block.
+/// Checks a decode kernel given a block and 2 characters more, returning the
+/// characters it decoded before the first one outside the alphabet, against
+/// `decode_quanta` over the block: every byte at every position of a valid
+/// block, the 2 characters past it, and a byte outside the alphabet at every
+/// position of a valid block stitched around CRLF at every split.
 #[cfg(test)]
-pub(crate) fn check_decode_kernel<const C: usize, const B: usize>(
-    kernel: impl Fn(&[u8; C], &mut [MaybeUninit<u8>; B]) -> usize,
+pub(crate) fn check_decode_kernel<const S: usize, const B: usize>(
+    kernel: impl Fn(&[u8; S], usize, &mut [MaybeUninit<u8>; B]) -> usize,
 ) {
-    let valid: [u8; C] = core::array::from_fn(|at| ALPHABET[(at * 37 + 11) % 64]);
+    let valid: alloc::vec::Vec<u8> = (0..S - 2).map(|at| ALPHABET[(at * 37 + 11) % 64]).collect();
+    let bytes = (0..S - 2).flat_map(|at| (0..=255).map(move |byte| (at, byte, S - 2)));
+    let splits = (4..S - 2)
+        .step_by(4)
+        .flat_map(|split| (0..=S - 2).map(move |at| (at, b'*', split)));
 
-    for at in 0..C {
-        for byte in 0..=255 {
-            let mut chars = valid;
-            chars[at] = byte;
+    for (at, byte, split) in bytes.chain(splits) {
+        let mut chars = valid.clone();
 
-            let mut out = [MaybeUninit::new(0); B];
-            let mut expected = [MaybeUninit::new(0); B];
-            let read = kernel(&chars, &mut out);
-            assert_eq!(read, decode_quanta(&chars, &mut expected), "{byte} at {at}");
-
-            // SAFETY: every slot was initialised before the calls.
-            let (out, expected) = unsafe {
-                (
-                    out.map(|b| b.assume_init()),
-                    expected.map(|b| b.assume_init()),
-                )
-            };
-
-            assert_eq!(
-                out[..read / 4 * 3],
-                expected[..read / 4 * 3],
-                "{byte} at {at}"
-            );
+        if let Some(slot) = chars.get_mut(at) {
+            *slot = byte;
         }
+
+        let window = [&chars[..split], b"\r\n", &chars[split..]].concat();
+        let mut out = [MaybeUninit::new(0); B];
+        let mut expected = [MaybeUninit::new(0); B];
+        let read = kernel(window.as_slice().try_into().unwrap(), split, &mut out);
+        assert_eq!(
+            read,
+            decode_quanta(&chars, &mut expected),
+            "{byte} at {at}, {split}"
+        );
+
+        // SAFETY: every slot was initialised before the calls.
+        let (out, expected) = unsafe {
+            (
+                out.map(|b| b.assume_init()),
+                expected.map(|b| b.assume_init()),
+            )
+        };
+
+        assert_eq!(
+            out[..read / 4 * 3],
+            expected[..read / 4 * 3],
+            "{byte} at {at}, {split}"
+        );
     }
 }
 
-/// Checks an encode kernel against `encode_groups` with every byte at every
-/// position of its window, its group `lead` bytes in.
+/// Checks an encode kernel given room for 2 characters more against
+/// `encode_groups`: every byte at every position of its window, its group
+/// `lead` bytes in, and its characters split around those 2 at every
+/// quantum.
 #[cfg(test)]
-pub(crate) fn check_encode_kernel<const W: usize, const C: usize>(
+pub(crate) fn check_encode_kernel<const W: usize, const N: usize>(
     lead: usize,
-    kernel: impl Fn(&[u8; W], &mut [MaybeUninit<u8>; C]),
+    kernel: impl Fn(&[u8; W], usize, &mut [MaybeUninit<u8>; N]),
 ) {
+    let chars = N - 2;
     let base: [u8; W] = core::array::from_fn(|at| (at * 73 + 5) as u8);
+    let bytes = (0..W).flat_map(|at| (0..=255).map(move |byte| (at, byte, chars)));
+    let splits = (4..chars).step_by(4).map(|split| (0, base[0], split));
 
-    for at in 0..W {
-        for byte in 0..=255 {
-            let mut bytes = base;
-            bytes[at] = byte;
+    for (at, byte, split) in bytes.chain(splits) {
+        let mut bytes = base;
+        bytes[at] = byte;
 
-            let mut out = [MaybeUninit::new(0); C];
-            let mut expected = [MaybeUninit::new(0); C];
-            kernel(&bytes, &mut out);
-            encode_groups(&bytes[lead..lead + C / 4 * 3], &mut expected);
+        let mut out = [MaybeUninit::new(0); N];
+        let mut expected = [MaybeUninit::new(0); N];
+        kernel(&bytes, split, &mut out);
+        encode_groups(&bytes[lead..lead + chars / 4 * 3], &mut expected);
 
-            // SAFETY: every slot was initialised before the calls.
-            let (out, expected) = unsafe {
-                (
-                    out.map(|b| b.assume_init()),
-                    expected.map(|b| b.assume_init()),
-                )
-            };
+        // SAFETY: every slot was initialised before the calls.
+        let (out, expected) = unsafe {
+            (
+                out.map(|b| b.assume_init()),
+                expected.map(|b| b.assume_init()),
+            )
+        };
 
-            assert_eq!(out, expected, "{byte} at {at}");
-        }
+        assert_eq!(out[..split], expected[..split], "{byte} at {at}, {split}");
+        assert_eq!(
+            out[split + 2..],
+            expected[split..chars],
+            "{byte} at {at}, {split}"
+        );
     }
 }
 
@@ -682,14 +718,14 @@ mod tests {
 
     #[test]
     fn kernels_match_the_quantum_and_group_loops() {
-        check_decode_kernel(|chars, out| run(decode_block::<12>(chars, out)));
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 12]| {
+        check_decode_kernel(|chars, split, out| run(decode_block::<18, 12>(chars, split, out)));
+        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 12]| {
             let mut wide = [MaybeUninit::new(0); 16];
-            let read = run(decode_block(chars, &mut wide));
+            let read = run(decode_block::<18, 16>(chars, split, &mut wide));
             out.copy_from_slice(&wide[..12]);
             read
         });
-        check_encode_kernel(0, encode_block);
+        check_encode_kernel(0, encode_block::<12, 18>);
     }
 
     fn run(bad: Bad) -> usize {

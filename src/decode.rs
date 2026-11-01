@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use crate::{
     cpu::Base64Cpu,
     driver,
-    scalar::{self, DecodeState},
+    scalar::{self, DecodeState, LINE, LINE_BYTES},
 };
 
 /// I/O-free base64 decoder, resumed with the caller's input and output
@@ -89,9 +89,9 @@ impl Base64Decode {
     }
 
     /// Decodes as much of `src` as fits in `dst`, returning the bytes read
-    /// and written: whole lines once a line was read whole, runs of whole
-    /// quanta, the line breaks between them, and everything else byte by
-    /// byte until the runs can take over.
+    /// and written: whole lines of `LINE` characters once one was read whole,
+    /// runs of whole quanta, the line breaks between them, and everything
+    /// else byte by byte until the runs can take over.
     fn run(&mut self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> (usize, usize) {
         let loops = self.cpu.loops();
         let state = &mut self.state;
@@ -106,16 +106,14 @@ impl Base64Decode {
                 let end = end.max(read);
 
                 if state.line_start
-                    && let Some((width, crlf)) = state.lines
-                    && end - read > width
+                    && let Some(crlf) = state.lines
+                    && end - read > LINE
                 {
                     // SAFETY: the token names a backend the CPU supports.
-                    let lines = unsafe {
-                        (loops.decode_lines)(&src[read..end], &mut dst[written..], width, crlf)
-                    };
-
-                    read += lines * (width + 1 + crlf as usize);
-                    written += lines * (width / 4 * 3);
+                    let lines =
+                        unsafe { (loops.decode_lines)(&src[read..end], &mut dst[written..], crlf) };
+                    read += lines * (LINE + 1 + crlf as usize);
+                    written += lines * LINE_BYTES;
                 }
 
                 // SAFETY: the token names a backend the CPU supports.

@@ -66,7 +66,8 @@ impl Bad {
 }
 
 /// Decodes 16 characters into the first 12 bytes of `out`, and its 4 spare
-/// bytes when it holds 16.
+/// bytes when it holds 16: the first 16 of `chars`, or when it holds more,
+/// its first `split` and the last ones.
 ///
 /// The high nibble of a character picks its class, and its low nibble the
 /// classes it allows, looked up with the character as it is: one from 128 up
@@ -75,11 +76,21 @@ impl Bad {
 /// four sextets of each 32-bit lane are then packed into three bytes.
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn decode<const N: usize>(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; N]) -> Bad {
-    const { assert!(N == 12 || N == 16) };
+fn decode<const C: usize, const N: usize>(
+    chars: &[u8; C],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) -> Bad {
+    const { assert!(C >= 16 && (N == 12 || N == 16)) };
 
-    // SAFETY: `chars` holds the 16 bytes the load reads.
-    let chars = unsafe { _mm_loadu_si128(chars.as_ptr().cast()) };
+    // SAFETY: `chars` holds the 16 bytes each load reads, from its start and
+    // from its end, and the mask the 16 the third one reads.
+    let chars = unsafe {
+        let first = _mm_loadu_si128(chars.as_ptr().cast());
+        let last = _mm_loadu_si128(chars.as_ptr().add(C - 16).cast());
+        let mask = _mm_loadu_si128(crate::driver::stitch(split).as_ptr().cast());
+        _mm_or_si128(_mm_andnot_si128(mask, first), _mm_and_si128(mask, last))
+    };
     let high = _mm_and_si128(_mm_srli_epi32::<4>(chars), _mm_set1_epi8(0x0f));
 
     let allowed = _mm_shuffle_epi8(
@@ -133,11 +144,17 @@ fn decode<const N: usize>(chars: &[u8; 16], out: &mut [MaybeUninit<u8>; N]) -> B
 }
 
 /// Encodes 12 bytes into 16 characters: from a window of 16, its group from
-/// its fifth byte, in one load, or from the group alone, in two.
+/// its fifth byte, in one load, or from the group alone, in two. When `out`
+/// holds more than 16, the characters from `split` on land past the line
+/// ending that fills the rest.
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 16]) {
-    const { assert!(W == 12 || W == 16) };
+fn encode<const W: usize, const N: usize>(
+    window: &[u8; W],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) {
+    const { assert!((W == 12 || W == 16) && N >= 16) };
 
     let spread = if W == 16 {
         // SAFETY: `window` holds the 16 bytes the load reads.
@@ -163,7 +180,11 @@ fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 16]) {
     };
 
     // SAFETY: `out` holds the 16 bytes the store writes.
-    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(split(spread))) };
+    unsafe { _mm_storeu_si128(out.as_mut_ptr().cast(), ascii(sextets(spread))) };
+
+    if N > 16 {
+        crate::driver::spread(out, split, 16);
+    }
 }
 
 /// The four sextets of each 32-bit lane, from the three bytes spread over
@@ -175,7 +196,7 @@ fn encode<const W: usize>(window: &[u8; W], out: &mut [MaybeUninit<u8>; 16]) {
 /// the cost.
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn split(spread: __m128i) -> __m128i {
+fn sextets(spread: __m128i) -> __m128i {
     let first = _mm_srli_epi16::<10>(_mm_mullo_epi16(spread, opaque(_mm_set1_epi32(0x0010_0001))));
 
     let second = _mm_mullo_epi16(
@@ -211,7 +232,7 @@ fn ascii(sextets: __m128i) -> __m128i {
 #[cfg(not(miri))]
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn opaque(mut value: __m128i) -> __m128i {
+pub(crate) fn opaque(mut value: __m128i) -> __m128i {
     // SAFETY: the template is empty: it leaves its register as it is, and
     // touches no other register, no flag and no memory.
     unsafe {
@@ -229,7 +250,7 @@ fn opaque(mut value: __m128i) -> __m128i {
 #[cfg(miri)]
 #[inline]
 #[target_feature(enable = "ssse3")]
-fn opaque(value: __m128i) -> __m128i {
+pub(crate) fn opaque(value: __m128i) -> __m128i {
     value
 }
 
@@ -244,20 +265,30 @@ mod tests {
         }
 
         // SAFETY: SSSE3 was detected above.
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 12]| unsafe {
-            run(decode(chars, out))
+        check_decode_kernel(|chars, split, out| unsafe {
+            run(decode::<18, 12>(chars, split, out))
         });
         // SAFETY: SSSE3 was detected above.
-        check_decode_kernel(|chars, out: &mut [MaybeUninit<u8>; 12]| unsafe {
+        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 12]| unsafe {
             let mut wide = [MaybeUninit::new(0); 16];
-            let read = run(decode(chars, &mut wide));
+            let read = run(decode::<18, 16>(chars, split, &mut wide));
             out.copy_from_slice(&wide[..12]);
             read
         });
         // SAFETY: SSSE3 was detected above.
-        check_encode_kernel(4, |window: &[u8; 16], out| unsafe { encode(window, out) });
+        check_encode_kernel(
+            4,
+            |window: &[u8; 16], split, out: &mut [MaybeUninit<u8>; 18]| unsafe {
+                encode(window, split, out)
+            },
+        );
         // SAFETY: SSSE3 was detected above.
-        check_encode_kernel(0, |bytes: &[u8; 12], out| unsafe { encode(bytes, out) });
+        check_encode_kernel(
+            0,
+            |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18]| unsafe {
+                encode(bytes, split, out)
+            },
+        );
     }
 
     #[target_feature(enable = "ssse3")]

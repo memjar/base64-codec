@@ -74,12 +74,31 @@ impl Bad {
     }
 }
 
-/// Decodes 64 characters into 48 bytes.
+/// Decodes 64 characters into 48 bytes: the first 64 of `chars`, or when it
+/// holds more, its first `split` and the last ones, picked quantum by
+/// quantum from the deinterleaved vectors.
 #[inline]
 #[target_feature(enable = "neon")]
-fn decode(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; 48]) -> Bad {
-    // SAFETY: `chars` holds the 64 bytes the load reads.
-    let chars = unsafe { vld4q_u8(chars.as_ptr()) };
+fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<u8>; 48]) -> Bad {
+    const { assert!(C >= 64) };
+
+    // SAFETY: `chars` holds the 64 bytes each load reads, from its start and
+    // from its end, and the mask the 16 the third one reads.
+    let chars = unsafe {
+        let (first, last) = (
+            vld4q_u8(chars.as_ptr()),
+            vld4q_u8(chars.as_ptr().add(C - 64)),
+        );
+        let mask = vld1q_u8(crate::driver::stitch(split / 4).as_ptr());
+
+        uint8x16x4_t(
+            vbslq_u8(mask, last.0, first.0),
+            vbslq_u8(mask, last.1, first.1),
+            vbslq_u8(mask, last.2, first.2),
+            vbslq_u8(mask, last.3, first.3),
+        )
+    };
+
     let (low, high) = (table(&DECODE_LOW), table(&DECODE_HIGH));
 
     let a = translate(chars.0, low, high);
@@ -108,10 +127,17 @@ fn decode(chars: &[u8; 64], out: &mut [MaybeUninit<u8>; 48]) -> Bad {
     bad
 }
 
-/// Encodes 48 bytes into 64 characters.
+/// Encodes 48 bytes into 64 characters, those from `split` on past the line
+/// ending that fills the rest of `out` when it holds more.
 #[inline]
 #[target_feature(enable = "neon")]
-fn encode(bytes: &[u8; 48], out: &mut [MaybeUninit<u8>; 64]) {
+fn encode<const W: usize, const N: usize>(
+    bytes: &[u8; W],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; N],
+) {
+    const { assert!(W == 48 && N >= 64) };
+
     // SAFETY: `bytes` holds the 48 bytes the load reads.
     let bytes = unsafe { vld3q_u8(bytes.as_ptr()) };
     let mask = vdupq_n_u8(0x3f);
@@ -137,6 +163,10 @@ fn encode(bytes: &[u8; 48], out: &mut [MaybeUninit<u8>; 64]) {
 
     // SAFETY: `out` holds the 64 bytes the store writes.
     unsafe { vst4q_u8(out.as_mut_ptr().cast(), chars) };
+
+    if N > 64 {
+        crate::driver::spread(out, split, 64);
+    }
 }
 
 /// Each character's sextet plus one, or zero outside the alphabet: the two
@@ -179,9 +209,11 @@ mod tests {
     #[test]
     fn kernels_match_scalar() {
         // SAFETY: the module only exists on targets guaranteeing NEON.
-        check_decode_kernel(|chars, out| unsafe { run(decode(chars, out)) });
+        check_decode_kernel(|chars, split, out| unsafe { run(decode::<66>(chars, split, out)) });
         // SAFETY: as above.
-        check_encode_kernel(0, |bytes, out| unsafe { encode(bytes, out) });
+        check_encode_kernel(0, |bytes, split, out| unsafe {
+            encode::<48, 66>(bytes, split, out)
+        });
     }
 
     #[target_feature(enable = "neon")]
