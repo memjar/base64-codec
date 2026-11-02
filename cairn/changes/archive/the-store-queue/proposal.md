@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: the-store-queue
-status: draft
+status: landed
 created: 2026-11-01
 ---
 
@@ -56,7 +56,7 @@ The code: src/decode.rs `decode_all` trims the input's end, then `lines_and_run`
 
 Ordered by expected gain, each to be measured before it is kept:
 
-1. AVX-512 wrapped encoding: find what holds the stores (35 a period for 1,248 bytes) and the loads behind them; or output assembled at its own 64-byte positions, each vector a `vpermt2b` of the two encoded blocks it draws from with the line ending taken from the index (the mask2 form), 20 stores a period instead of 35, 20 index vectors per period and line ending, about 60 lines of AVX-512 code.
+1. AVX-512 wrapped encoding: find what holds the stores (35 a period for 1,248 bytes) and the loads behind them; or output assembled at its own 64-byte positions, each vector a `vpermt2b` of the two encoded blocks it draws from with the line ending taken from the index (the mask2 form), 20 stores a period instead of 35, 20 index vectors per period and line ending, about 60 lines of AVX-512 code. quoted-printable-codec's note that `vpermt2b` runs 0.8 a cycle on Zen 5 was a latency artifact of its loop: re-measured on 2026-11-02, `vpermt2b` and `vpermi2b` run 2 a cycle, as `vpermb` does. The cost model: 38 `vpermb` and 20 `vpermt2b` a period on the two permute pipes, about 29 cycles, the 19 multishifts beside them, 20 stores, against 55 cycles today and 21 unwrapped. 1,248 bytes are 19.5 cache lines (1,232 with LF are 19.25), so either a double period (CRLF) and a quadruple one (LF) to stay on cache lines, or a masked last vector and the output's alignment drifting by period: weigh table size against the 15% of stores off a cache line. A cheaper first try in the same spirit (quoted-printable-codec's read-ahead): issue the next blocks' loads before this block's stores, aimed at the loads that wait (23%) and the conflicts with older stores.
 2. Small calls: one or two blocks without `decode_blocks`' fixed costs, and single blocks with fewer bounds checks (exact chunks and a separate last block measured fewer instructions but more cycles on AVX2). Since a-url-alphabet (log 2026-11-01-a-url-alphabet), the glue reading the codec costs about 20 instructions more a padded encode call and 8 a decode call (the line ending, alphabet and padding unpacked from one register, the loops picked by backend and alphabet, the padding branch of `encode_tail`), 1 to 3.5 cycles at 64 bytes: measure against that tree, not the table above.
 3. AVX2 unwrapped decoding at 64 bytes, level with encodify (43.4 against 43.9 cycles).
 4. Scalar decoding robust to codegen units, with fewer operations around its loads.

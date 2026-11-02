@@ -88,7 +88,8 @@ macro_rules! base64_driver {
             window: $window:literal,
             lead: $lead:literal,
             kernel: $encode:ident,
-            narrow: $encode_narrow:path $(,)?
+            narrow: $encode_narrow:path
+            $(, periods: $encode_periods:ident)? $(,)?
         ) $(,)?
     ) => {
         /// The loops of the standard alphabet, then of the URL one.
@@ -392,6 +393,7 @@ macro_rules! base64_driver {
             let lines = (src.len() / LEN).min(dst.len() / span);
 
             if lines >= LINES {
+                $(use self::$encode_periods as encode_periods;)?
                 return encode_periods::<URL, N, SPAN>(src, dst, lines);
             }
 
@@ -615,6 +617,41 @@ mod tests {
                                 "{codec:?} {len}"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_backend_matches_the_reference_around_whole_cycles() {
+        let mut rng = Rng(11);
+
+        // Around one and two cycles of 32 lines ending with CRLF and of 64
+        // ending with LF, whose output fills whole vectors.
+        for len in [1824, 3648, 7296]
+            .into_iter()
+            .flat_map(|end| end - 64..end + 64)
+        {
+            let input = rng.bytes(len);
+
+            for wrap in WRAPS {
+                for style in STYLES {
+                    let reference = Base64Codec { wrap, ..style };
+                    let expected = reference_encode(&input, reference);
+
+                    for cpu in available() {
+                        let codec = Base64Codec { cpu, ..reference };
+                        assert_eq!(one_shot_encode(&input, codec), expected, "{codec:?} {len}");
+
+                        let mut encoder = Base64Encode::new(codec);
+                        let mut out = vec![0; expected.len()];
+                        let first = encoder.resume(&input[..len / 3], &mut out);
+                        let second = encoder.resume(&input[len / 3..], &mut out[first.written..]);
+                        let written = first.written + second.written;
+                        encoder.finish(&mut out[written..]).unwrap();
+                        assert_eq!(out, expected, "{codec:?} {len}");
                     }
                 }
             }

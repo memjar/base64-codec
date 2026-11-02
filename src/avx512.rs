@@ -10,7 +10,7 @@ use core::arch::x86::*;
 use core::arch::x86_64::*;
 use core::mem::MaybeUninit;
 
-use crate::scalar::ALPHABETS;
+use crate::scalar::{ALPHABETS, LINE, LINE_BYTES};
 
 /// Per alphabet, the sextets of the characters below 128, 128 outside it.
 static DECODE: [[[u8; 64]; 2]; 2] = [decode_table(ALPHABETS[0]), decode_table(ALPHABETS[1])];
@@ -41,6 +41,17 @@ static SPREAD: [u8; 64] = {
     table
 };
 
+/// Per 64 bytes of output in a cycle of lines whose output fills whole
+/// vectors: the byte of the two encoded blocks the vector draws from that
+/// each lane takes, bit 7 set, or the lane's line ending byte.
+#[derive(Clone, Copy)]
+#[repr(align(64))]
+struct Wrap([u8; 64]);
+
+/// The cycles of 32 lines ending with CRLF and of 64 ending with LF.
+static CRLF: [Wrap; 39] = wraps::<78, 39>();
+static LF: [Wrap; 77] = wraps::<77, 77>();
+
 base64_driver!(
     #[target_feature(enable = "avx512vbmi")]
     decode(
@@ -55,6 +66,7 @@ base64_driver!(
         lead: 0,
         kernel: encode,
         narrow: encode_short,
+        periods: encode_wrapped,
     ),
 );
 
@@ -153,7 +165,7 @@ fn encode<const S: usize, const N: usize, const K: usize>(
             unsafe { _mm512_loadu_si512(bytes.as_ptr().add(at).cast()) }
         };
 
-        let chars = encode_vector(bytes, url);
+        let chars = encode_vector(bytes, 0, url);
 
         // SAFETY: the stores write the first and the last 64 bytes of `out`.
         unsafe {
@@ -199,6 +211,7 @@ fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>], url: bool) -> usize {
     // SAFETY: the load reads the first `bytes` bytes of `src`.
     let chars = encode_vector(
         unsafe { _mm512_maskz_loadu_epi8(mask(bytes), src.as_ptr().cast()) },
+        0,
         url,
     );
 
@@ -206,6 +219,81 @@ fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>], url: bool) -> usize {
     unsafe { _mm512_mask_storeu_epi8(dst.as_mut_ptr().cast(), mask(bytes / 3 * 4), chars) };
 
     bytes
+}
+
+/// `encode_periods`, by `encode_cycles` from 32 lines on.
+#[inline]
+#[target_feature(enable = "avx512vbmi")]
+fn encode_wrapped<const URL: bool, const N: usize, const SPAN: usize>(
+    src: &[u8],
+    dst: &mut [MaybeUninit<u8>],
+    lines: usize,
+) -> usize {
+    match lines {
+        ..32 => encode_periods::<URL, N, SPAN>(src, dst, lines),
+        _ => encode_cycles::<URL, N, SPAN>(src, dst, lines),
+    }
+}
+
+/// `encode_periods` with each 64 bytes of output picked from the two encoded
+/// blocks it draws from by the `Wrap` of their place, line endings included,
+/// as long as whole vectors fit the lines.
+#[target_feature(enable = "avx512vbmi")]
+#[inline(never)]
+fn encode_cycles<const URL: bool, const N: usize, const SPAN: usize>(
+    src: &[u8],
+    dst: &mut [MaybeUninit<u8>],
+    lines: usize,
+) -> usize {
+    let span = SPAN / 16;
+    let wraps: &[Wrap] = if span == 78 { &CRLF } else { &LF };
+    // The one vector of a cycle drawing from the blocks of the one before.
+    let stay = const { stay(SPAN / 16) };
+    let (outs, _) = dst[..lines * span / 64 * 64].as_chunks_mut::<64>();
+    let last = src.len().saturating_sub(48);
+    let mut done = 0;
+
+    let Some(first) = src.first_chunk::<64>() else {
+        return encode_periods::<URL, N, SPAN>(src, dst, lines);
+    };
+
+    // The encoded blocks the vector draws from, and where the second starts.
+    let (mut low, mut high, mut from) = (
+        _mm512_setzero_si512(),
+        encode_vector(vector(first), 0, URL),
+        0,
+    );
+
+    'cycles: for outs in outs.chunks_mut(wraps.len()) {
+        for (at, (wrap, out)) in wraps.iter().zip(outs).enumerate() {
+            if at != stay {
+                from += 48;
+
+                if from > last {
+                    break 'cycles;
+                }
+
+                // SAFETY: the load reads the 64 bytes of `src` ending the block.
+                let bytes = unsafe { _mm512_loadu_si512(src.as_ptr().add(from - 16).cast()) };
+                (low, high) = (high, encode_vector(bytes, 16, URL));
+            }
+
+            let index = vector(&wrap.0);
+            let mask = _mm512_movepi8_mask(index);
+            let chars = _mm512_mask2_permutex2var_epi8(low, index, mask, high);
+
+            // SAFETY: the store writes the 64 bytes of `out`.
+            unsafe { _mm512_storeu_si512(out.as_mut_ptr().cast(), chars) };
+            done += 1;
+        }
+    }
+
+    let whole = done * 64 / span;
+    let (src, dst) = (
+        &src[whole * LINE_BYTES..lines * LINE_BYTES],
+        &mut dst[whole * span..],
+    );
+    whole + encode_lines::<URL, N, SPAN>(src, dst)
 }
 
 /// The 48 bytes of 64 characters, first in the vector, and their `Bad`.
@@ -221,11 +309,12 @@ fn decode_vector(chars: __m512i, url: bool) -> (__m512i, Bad) {
     (bytes, Bad(_mm512_or_si512(chars, sextets)))
 }
 
-/// The 64 characters of 48 bytes.
+/// The 64 characters of the 48 bytes `lead` bytes into `bytes`.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
-fn encode_vector(bytes: __m512i, url: bool) -> __m512i {
-    let spread = _mm512_permutexvar_epi8(vector(&SPREAD), bytes);
+fn encode_vector(bytes: __m512i, lead: i8, url: bool) -> __m512i {
+    let spread = _mm512_add_epi8(vector(&SPREAD), _mm512_set1_epi8(lead));
+    let spread = _mm512_permutexvar_epi8(spread, bytes);
     let sextets = _mm512_multishift_epi64_epi8(_mm512_set1_epi64(0x3036_242a_1016_040a), spread);
     _mm512_permutexvar_epi8(sextets, vector(ALPHABETS[url as usize]))
 }
@@ -247,6 +336,47 @@ const fn decode_table(alphabet: &[u8; 64]) -> [[u8; 64]; 2] {
     }
 
     table
+}
+
+/// The `Wrap` of each of the `V` vectors of a cycle of lines `W` bytes long.
+const fn wraps<const W: usize, const V: usize>() -> [Wrap; V] {
+    let mut table = [Wrap([0; 64]); V];
+    let mut at = 0;
+
+    while at < 64 * V {
+        // The first character of the two blocks the vector draws from.
+        let first = chars(at / 64 * 64, W) / 64 * 64;
+
+        table[at / 64].0[at % 64] = match at % W {
+            col if col < LINE => {
+                assert!(chars(at, W) - first < 128);
+                (chars(at, W) - first) as u8 | 0x80
+            }
+            col if col == LINE && W == LINE + 2 => b'\r',
+            _ => b'\n',
+        };
+
+        at += 1;
+    }
+
+    table
+}
+
+/// The vector of a cycle of lines `span` bytes long drawing from the blocks
+/// of the vector before it: a cycle has a block fewer than vectors.
+const fn stay(span: usize) -> usize {
+    let mut at = 64;
+
+    while chars(at, span) / 64 != chars(at - 64, span) / 64 {
+        at += 64;
+    }
+
+    at / 64
+}
+
+/// The characters before output byte `at`, lines `span` bytes long.
+const fn chars(at: usize, span: usize) -> usize {
+    at / span * LINE + if at % span < LINE { at % span } else { LINE }
 }
 
 /// The mask of a vector's first `len` bytes, `len` below 64.
