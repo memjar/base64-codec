@@ -57,7 +57,7 @@ The code: src/decode.rs `decode_all` trims the input's end, then `lines_and_run`
 Ordered by expected gain, each to be measured before it is kept:
 
 1. AVX-512 wrapped encoding: find what holds the stores (35 a period for 1,248 bytes) and the loads behind them; or output assembled at its own 64-byte positions, each vector a `vpermt2b` of the two encoded blocks it draws from with the line ending taken from the index (the mask2 form), 20 stores a period instead of 35, 20 index vectors per period and line ending, about 60 lines of AVX-512 code.
-2. Small calls: one or two blocks without `decode_blocks`' fixed costs, and single blocks with fewer bounds checks (exact chunks and a separate last block measured fewer instructions but more cycles on AVX2).
+2. Small calls: one or two blocks without `decode_blocks`' fixed costs, and single blocks with fewer bounds checks (exact chunks and a separate last block measured fewer instructions but more cycles on AVX2). Since a-url-alphabet (log 2026-11-01-a-url-alphabet), the glue reading the codec costs about 20 instructions more a padded encode call and 8 a decode call (the line ending, alphabet and padding unpacked from one register, the loops picked by backend and alphabet, the padding branch of `encode_tail`), 1 to 3.5 cycles at 64 bytes: measure against that tree, not the table above.
 3. AVX2 unwrapped decoding at 64 bytes, level with encodify (43.4 against 43.9 cycles).
 4. Scalar decoding robust to codegen units, with fewer operations around its loads.
 5. Size: the SSSE3 and AVX2 twins (decode tables), the decode stitch of SSSE3 and scalar compiled only for periods they never run, `encode_all` against the encoder's run.

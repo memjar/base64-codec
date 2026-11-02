@@ -27,7 +27,7 @@ The library SHALL build `#![no_std]` under every feature combination with simd-c
 
 ### Requirement: One codec for every call
 
-Every call SHALL run from a `Base64Codec`, a `Copy` value holding the backend and the line ending of encoded output: its one-shot methods encode or decode a whole input, and `Base64Encode::new` and `Base64Decode::new` take it to encode or decode chunk by chunk. The codec SHALL hold no state between calls, so that no one-shot call can run in the middle of a resumed input.
+Every call SHALL run from a `Base64Codec`, a `Copy` value holding the backend, the alphabet, whether encoding pads and the line ending of encoded output: its one-shot methods encode or decode a whole input, and `Base64Encode::new` and `Base64Decode::new` take it to encode or decode chunk by chunk. The codec SHALL hold no state between calls, so that no one-shot call can run in the middle of a resumed input.
 
 #### Scenario: One codec for the whole application
 - GIVEN a codec built once with CRLF line endings

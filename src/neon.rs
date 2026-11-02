@@ -5,13 +5,17 @@
 
 use core::{arch::aarch64::*, mem::MaybeUninit};
 
-use crate::scalar::ALPHABET;
+use crate::scalar::ALPHABETS;
 
-/// Each character below 64 as its sextet plus one, or 0 outside the alphabet.
-static DECODE_LOW: [u8; 64] = decode_table(0);
+/// Per alphabet, each character below 64 as its sextet plus one, or 0
+/// outside the alphabet.
+static DECODE_LOW: [[u8; 64]; 2] = [decode_table(ALPHABETS[0], 0), decode_table(ALPHABETS[1], 0)];
 
 /// The characters from 64 to 127, less 64, mapped as in `DECODE_LOW`.
-static DECODE_HIGH: [u8; 64] = decode_table(64);
+static DECODE_HIGH: [[u8; 64]; 2] = [
+    decode_table(ALPHABETS[0], 64),
+    decode_table(ALPHABETS[1], 64),
+];
 
 base64_driver!(
     #[target_feature(enable = "neon")]
@@ -65,7 +69,12 @@ impl Bad {
 /// Decodes a block of 64 characters into 48 bytes.
 #[inline]
 #[target_feature(enable = "neon")]
-fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<u8>; 48]) -> Bad {
+fn decode<const C: usize>(
+    chars: &[u8; C],
+    split: usize,
+    out: &mut [MaybeUninit<u8>; 48],
+    url: bool,
+) -> Bad {
     const { assert!(C >= 64) };
 
     // SAFETY: the loads read 64 bytes of `chars` and 16 of the masks.
@@ -84,7 +93,10 @@ fn decode<const C: usize>(chars: &[u8; C], split: usize, out: &mut [MaybeUninit<
         )
     };
 
-    let (low, high) = (table(&DECODE_LOW), table(&DECODE_HIGH));
+    let (low, high) = (
+        table(&DECODE_LOW[url as usize]),
+        table(&DECODE_HIGH[url as usize]),
+    );
 
     let a = translate(chars.0, low, high);
     let b = translate(chars.1, low, high);
@@ -119,11 +131,12 @@ fn encode<const S: usize, const N: usize, const K: usize>(
     bytes: &[u8; S],
     split: usize,
     outs: [&mut [MaybeUninit<u8>; N]; K],
+    url: bool,
 ) {
     const { assert!(S == 48 * K && N >= 64) };
 
     let mask = vdupq_n_u8(0x3f);
-    let alphabet = table(ALPHABET);
+    let alphabet = table(ALPHABETS[url as usize]);
 
     for (group, out) in bytes.as_chunks::<48>().0.iter().zip(outs) {
         // SAFETY: the load reads the 48 bytes of `group`.
@@ -170,12 +183,12 @@ fn table(bytes: &[u8; 64]) -> uint8x16x4_t {
     unsafe { vld1q_u8_x4(bytes.as_ptr()) }
 }
 
-const fn decode_table(base: u8) -> [u8; 64] {
+const fn decode_table(alphabet: &[u8; 64], base: u8) -> [u8; 64] {
     let mut table = [0; 64];
     let mut sextet = 0;
 
     while sextet < 64 {
-        let ch = ALPHABET[sextet];
+        let ch = alphabet[sextet];
 
         if ch >= base && ch - base < 64 {
             table[(ch - base) as usize] = sextet as u8 + 1;
@@ -194,10 +207,12 @@ mod tests {
     #[test]
     fn kernels_match_scalar() {
         // SAFETY: the module only exists on targets guaranteeing NEON.
-        check_decode_kernel(|chars, split, out| unsafe { run(decode::<66>(chars, split, out)) });
+        check_decode_kernel(|chars, split, out, url| unsafe {
+            run(decode::<66>(chars, split, out, url))
+        });
         // SAFETY: as above.
-        check_encode_kernel(0, |bytes, split, out| unsafe {
-            encode::<48, 66, 1>(bytes, split, [out])
+        check_encode_kernel(0, |bytes, split, out, url| unsafe {
+            encode::<48, 66, 1>(bytes, split, [out], url)
         });
     }
 

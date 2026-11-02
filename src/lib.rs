@@ -1,12 +1,13 @@
 //! # base64-codec
 //!
-//! Base64 with the standard alphabet (RFC 4648 4), decoded leniently as mail
-//! needs it, with SIMD, `no_std` and no I/O.
+//! Base64 with the standard or the URL alphabet (RFC 4648 4 and 5), decoded
+//! leniently as mail needs it, with SIMD, `no_std` and no I/O.
 //!
 //! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, picked from the
 //! `simd_cpu::SimdCpu` the application gets once, usually from
-//! `SimdCpu::detect`, and the line ending of encoded output. Its methods take
-//! a whole input, [`Base64Encode`] and [`Base64Decode`] chunk by chunk.
+//! `SimdCpu::detect`, its alphabet, whether encoding pads, and the line ending
+//! of encoded output. Its methods take a whole input, [`Base64Encode`] and
+//! [`Base64Decode`] chunk by chunk.
 //!
 //! The scalar steps alone handle what is not whole quanta: padding, stray
 //! bytes, partial quanta, the carry between calls. Every backend has block
@@ -23,6 +24,7 @@
 //! let codec = Base64Codec {
 //!     cpu: Base64Cpu::new(SimdCpu::BASELINE),
 //!     wrap: Some(Base64Eol::Crlf),
+//!     ..Base64Codec::BASELINE
 //! };
 //!
 //! let mut encoded = [0; 6];

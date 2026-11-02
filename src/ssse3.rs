@@ -65,6 +65,7 @@ fn decode<const C: usize, const N: usize>(
     chars: &[u8; C],
     split: usize,
     out: &mut [MaybeUninit<u8>; N],
+    url: bool,
 ) -> Bad {
     const { assert!(C >= 16 && (N == 12 || N == 16)) };
 
@@ -77,11 +78,18 @@ fn decode<const C: usize, const N: usize>(
     };
     let high = _mm_and_si128(_mm_srli_epi32::<4>(chars), _mm_set1_epi8(0x0f));
 
+    // The classes of the low nibbles B to F, of the high nibble 7, and the
+    // offset of the high nibble 2: the URL alphabet moves 62 and 63.
+    let ([b, c, d, e, f], seven, two) = if url {
+        ([0x3b, 0x3b, 0x3a, 0x3b, 0x33], 0x20, 17)
+    } else {
+        ([0x1a, 0x1b, 0x1b, 0x1b, 0x1a], 0x08, 19)
+    };
+
     let allowed = _mm_shuffle_epi8(
         _mm_andnot_si128(
             _mm_setr_epi8(
-                0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, 0x1a, 0x1b, 0x1b,
-                0x1b, 0x1a,
+                0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, b, c, d, e, f,
             ),
             _mm_set1_epi8(-1),
         ),
@@ -90,18 +98,25 @@ fn decode<const C: usize, const N: usize>(
 
     let class = _mm_shuffle_epi8(
         _mm_setr_epi8(
-            0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, 0x08, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+            0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, seven, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
             0x10, 0x10,
         ),
         high,
     );
 
     let offsets = _mm_shuffle_epi8(
-        _mm_setr_epi8(0, 0, 19, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0),
+        _mm_setr_epi8(0, 0, two, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0),
         high,
     );
 
-    let sextets = _mm_min_epu8(_mm_add_epi8(chars, offsets), _mm_set1_epi8(63));
+    let mut sextets = _mm_add_epi8(chars, offsets);
+
+    if url {
+        // `_` shares its high nibble with `P` to `Z`: saturated to 63 below.
+        sextets = _mm_or_si128(sextets, _mm_cmpeq_epi8(chars, _mm_set1_epi8(b'_' as i8)));
+    }
+
+    let sextets = _mm_min_epu8(sextets, _mm_set1_epi8(63));
     let pairs = _mm_maddubs_epi16(sextets, _mm_set1_epi32(0x0140_0140));
     let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0001_1000));
 
@@ -134,8 +149,11 @@ fn encode<const S: usize, const N: usize, const K: usize>(
     bytes: &[u8; S],
     split: usize,
     outs: [&mut [MaybeUninit<u8>; N]; K],
+    url: bool,
 ) {
     const { assert!(matches!(S - 12 * (K - 1), 12 | 16) && N >= 16) };
+
+    let (sixty_two, sixty_three) = if url { (-17, 32) } else { (-19, -16) };
 
     for (group, out) in outs.into_iter().enumerate() {
         let at = 12 * group;
@@ -180,7 +198,22 @@ fn encode<const S: usize, const N: usize, const K: usize>(
 
         let offsets = _mm_shuffle_epi8(
             _mm_setr_epi8(
-                65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0,
+                65,
+                71,
+                -4,
+                -4,
+                -4,
+                -4,
+                -4,
+                -4,
+                -4,
+                -4,
+                -4,
+                -4,
+                sixty_two,
+                sixty_three,
+                0,
+                0,
             ),
             ranges,
         );
@@ -224,28 +257,30 @@ mod tests {
         }
 
         // SAFETY: SSSE3 was detected above.
-        check_decode_kernel(|chars, split, out| unsafe {
-            run(decode::<18, 12>(chars, split, out))
+        check_decode_kernel(|chars, split, out, url| unsafe {
+            run(decode::<18, 12>(chars, split, out, url))
         });
         // SAFETY: SSSE3 was detected above.
-        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 12]| unsafe {
-            let mut wide = [MaybeUninit::new(0); 16];
-            let read = run(decode::<18, 16>(chars, split, &mut wide));
-            out.copy_from_slice(&wide[..12]);
-            read
-        });
+        check_decode_kernel(
+            |chars, split, out: &mut [MaybeUninit<u8>; 12], url| unsafe {
+                let mut wide = [MaybeUninit::new(0); 16];
+                let read = run(decode::<18, 16>(chars, split, &mut wide, url));
+                out.copy_from_slice(&wide[..12]);
+                read
+            },
+        );
         // SAFETY: SSSE3 was detected above.
         check_encode_kernel(
             4,
-            |window: &[u8; 16], split, out: &mut [MaybeUninit<u8>; 18]| unsafe {
-                encode(window, split, [out])
+            |window: &[u8; 16], split, out: &mut [MaybeUninit<u8>; 18], url| unsafe {
+                encode(window, split, [out], url)
             },
         );
         // SAFETY: SSSE3 was detected above.
         check_encode_kernel(
             0,
-            |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18]| unsafe {
-                encode(bytes, split, [out])
+            |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18], url| unsafe {
+                encode(bytes, split, [out], url)
             },
         );
     }

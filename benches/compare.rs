@@ -62,7 +62,11 @@ fn encodes(c: &mut Criterion) {
             group.throughput(Throughput::Bytes(size as u64));
 
             for (label, cpu) in cpus() {
-                let codec = Base64Codec { cpu, wrap };
+                let codec = Base64Codec {
+                    cpu,
+                    wrap,
+                    ..Base64Codec::BASELINE
+                };
 
                 group.bench_with_input(BenchmarkId::new(label, size), &src, |b, src| {
                     b.iter(|| codec.encode(black_box(src), &mut out))
@@ -137,7 +141,11 @@ fn decodes(c: &mut Criterion) {
             group.throughput(Throughput::Bytes(size as u64));
 
             for (label, cpu) in cpus() {
-                let codec = Base64Codec { cpu, wrap };
+                let codec = Base64Codec {
+                    cpu,
+                    wrap,
+                    ..Base64Codec::BASELINE
+                };
 
                 group.bench_with_input(BenchmarkId::new(label, size), &src, |b, src| {
                     b.iter(|| codec.decode(black_box(src), &mut out))

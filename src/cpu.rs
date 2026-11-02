@@ -28,8 +28,9 @@ impl Base64Cpu {
         self.backend
     }
 
-    pub(crate) fn loops(self) -> &'static Loops {
-        match self.backend {
+    /// The loops of this backend for the URL alphabet or the standard one.
+    pub(crate) fn loops(self, url: bool) -> &'static Loops {
+        let loops = match self.backend {
             Base64Backend::Scalar => &crate::scalar::LOOPS,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Base64Backend::Ssse3 => &crate::ssse3::LOOPS,
@@ -39,7 +40,9 @@ impl Base64Cpu {
             Base64Backend::Avx512 => &crate::avx512::LOOPS,
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             Base64Backend::Neon => &crate::neon::LOOPS,
-        }
+        };
+
+        &loops[url as usize]
     }
 }
 

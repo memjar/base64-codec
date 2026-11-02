@@ -6,11 +6,11 @@ status: current
 
 # Decoding
 
-Lenient base64 decoding, as mail needs it, with the exact semantics of the base64 wrapper mime-rs used before this crate: it never fails, and returns the bytes and whether the input was clean.
+Lenient base64 decoding, as mail needs it, in the codec's alphabet, with the exact semantics of the base64 wrapper mime-rs used before this crate: it never fails, and returns the bytes and whether the input was clean.
 
 ### Requirement: Lenient decoding
 
-The decoder SHALL skip CR, LF, SP and HTAB silently, skip every other byte outside the alphabet and report it, accept missing padding and non-zero trailing bits, decode symbols after padding as a new run and report it, and drop a lone trailing symbol and report it. For every input it SHALL return the same bytes and the same clean flag as mime-rs's src/codec/base64.rs as of 2026-10-31, and it SHALL never fail or panic.
+The decoder SHALL skip CR, LF, SP and HTAB silently, skip every other byte outside the alphabet and report it, accept missing padding and non-zero trailing bits, decode symbols after padding as a new run and report it, and drop a lone trailing symbol and report it. For every input under the standard alphabet it SHALL return the same bytes and the same clean flag as mime-rs's src/codec/base64.rs as of 2026-10-31, and it SHALL never fail or panic.
 
 #### Scenario: A stray byte
 - GIVEN `AAEC*AwQF`
@@ -41,3 +41,12 @@ The decoder SHALL skip CR, LF, SP and HTAB silently, skip every other byte outsi
 - GIVEN `aGk=` followed by FF
 - WHEN it is decoded
 - THEN the bytes are `hi` and the input is reported unclean
+
+### Requirement: The codec's alphabet alone
+
+The decoder SHALL take the symbols of the codec's alphabet alone: under `Base64Alphabet::Url`, `-` and `_` as the sextets 62 and 63 and `+` and `/` as bytes outside the alphabet, and the reverse under `Base64Alphabet::Standard`, every other lenient rule unchanged.
+
+#### Scenario: A standard symbol under the URL alphabet
+- GIVEN `aGk+aGk` and a codec with the URL alphabet
+- WHEN it is decoded
+- THEN `+` is skipped, the bytes are those of `aGkaGk` and the input is reported unclean

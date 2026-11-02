@@ -41,7 +41,10 @@ fn decoding_matches_the_wrapper() {
         let clean = wrapper::decode(input, &mut expected);
 
         for cpu in cpus() {
-            let codec = Base64Codec { cpu, wrap: None };
+            let codec = Base64Codec {
+                cpu,
+                ..Base64Codec::BASELINE
+            };
             let mut out = vec![0; codec.decoded_len_max(input.len())];
             let output = codec.decode(input, &mut out).unwrap();
             out.truncate(output.written);
@@ -74,7 +77,11 @@ fn encoding_matches_the_wrapper() {
             }
 
             for cpu in cpus() {
-                let codec = Base64Codec { cpu, wrap };
+                let codec = Base64Codec {
+                    cpu,
+                    wrap,
+                    ..Base64Codec::BASELINE
+                };
                 let mut out = vec![0; codec.encoded_len(len).unwrap()];
                 let written = codec.encode(&bytes, &mut out).unwrap();
                 out.truncate(written);

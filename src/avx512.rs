@@ -10,21 +10,10 @@ use core::arch::x86::*;
 use core::arch::x86_64::*;
 use core::mem::MaybeUninit;
 
-use crate::scalar::ALPHABET;
+use crate::scalar::ALPHABETS;
 
-/// The sextets of the characters below 128, 128 outside the alphabet.
-static DECODE: [[u8; 64]; 2] = {
-    let mut table = [[128; 64]; 2];
-    let mut sextet = 0;
-
-    while sextet < 64 {
-        let ch = ALPHABET[sextet] as usize;
-        table[ch / 64][ch % 64] = sextet as u8;
-        sextet += 1;
-    }
-
-    table
-};
+/// Per alphabet, the sextets of the characters below 128, 128 outside it.
+static DECODE: [[[u8; 64]; 2]; 2] = [decode_table(ALPHABETS[0]), decode_table(ALPHABETS[1])];
 
 /// The byte of `quads` each decoded byte comes from.
 static PACK: [u8; 64] = {
@@ -106,6 +95,7 @@ fn decode<const C: usize, const N: usize>(
     chars: &[u8; C],
     split: usize,
     out: &mut [MaybeUninit<u8>; N],
+    url: bool,
 ) -> Bad {
     const { assert!(C >= 64 && (N == 48 || N == 64)) };
 
@@ -116,7 +106,7 @@ fn decode<const C: usize, const N: usize>(
         _mm512_mask_blend_epi8(!(u64::MAX >> (64 - split)), first, last)
     };
 
-    let (bytes, bad) = decode_vector(chars);
+    let (bytes, bad) = decode_vector(chars, url);
 
     if N < 64 {
         // SAFETY: the stores write the 48 bytes of `out`.
@@ -143,6 +133,7 @@ fn encode<const S: usize, const N: usize, const K: usize>(
     bytes: &[u8; S],
     split: usize,
     outs: [&mut [MaybeUninit<u8>; N]; K],
+    url: bool,
 ) {
     const { assert!(matches!(S - 48 * (K - 1), 48 | 64) && N >= 64) };
 
@@ -162,7 +153,7 @@ fn encode<const S: usize, const N: usize, const K: usize>(
             unsafe { _mm512_loadu_si512(bytes.as_ptr().add(at).cast()) }
         };
 
-        let chars = encode_vector(bytes);
+        let chars = encode_vector(bytes, url);
 
         // SAFETY: the stores write the first and the last 64 bytes of `out`.
         unsafe {
@@ -181,15 +172,17 @@ fn encode<const S: usize, const N: usize, const K: usize>(
 /// `Loops::decode_run` below a block in one masked block, by `decode_quanta`
 /// when a character is outside the alphabet.
 #[target_feature(enable = "avx512vbmi")]
-fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
+fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>], url: bool) -> usize {
     let chars = (src.len() / 4).min(dst.len() / 3).min(15) * 4;
 
     // SAFETY: the load reads the first `chars` bytes of `src`.
-    let (bytes, bad) =
-        decode_vector(unsafe { _mm512_maskz_loadu_epi8(mask(chars), src.as_ptr().cast()) });
+    let (bytes, bad) = decode_vector(
+        unsafe { _mm512_maskz_loadu_epi8(mask(chars), src.as_ptr().cast()) },
+        url,
+    );
 
     if _mm512_movepi8_mask(bad.0) & mask(chars) != 0 {
-        return crate::scalar::decode_quanta(src, dst);
+        return crate::scalar::decode_quanta(src, dst, url);
     }
 
     // SAFETY: the store writes the first `chars / 4 * 3` bytes of `dst`.
@@ -200,11 +193,14 @@ fn decode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
 
 /// `Loops::encode_run` below a block in one masked block.
 #[target_feature(enable = "avx512vbmi")]
-fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
+fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>], url: bool) -> usize {
     let bytes = (src.len() / 3).min(dst.len() / 4).min(15) * 3;
 
     // SAFETY: the load reads the first `bytes` bytes of `src`.
-    let chars = encode_vector(unsafe { _mm512_maskz_loadu_epi8(mask(bytes), src.as_ptr().cast()) });
+    let chars = encode_vector(
+        unsafe { _mm512_maskz_loadu_epi8(mask(bytes), src.as_ptr().cast()) },
+        url,
+    );
 
     // SAFETY: the store writes the first `bytes / 3 * 4` bytes of `dst`.
     unsafe { _mm512_mask_storeu_epi8(dst.as_mut_ptr().cast(), mask(bytes / 3 * 4), chars) };
@@ -215,8 +211,8 @@ fn encode_short(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
 /// The 48 bytes of 64 characters, first in the vector, and their `Bad`.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
-fn decode_vector(chars: __m512i) -> (__m512i, Bad) {
-    let [low, high] = &DECODE;
+fn decode_vector(chars: __m512i, url: bool) -> (__m512i, Bad) {
+    let [low, high] = &DECODE[url as usize];
     let sextets = _mm512_permutex2var_epi8(vector(low), chars, vector(high));
     let pairs = _mm512_maddubs_epi16(sextets, _mm512_set1_epi32(0x0140_0140));
     let quads = _mm512_madd_epi16(pairs, _mm512_set1_epi32(0x0001_1000));
@@ -228,16 +224,29 @@ fn decode_vector(chars: __m512i) -> (__m512i, Bad) {
 /// The 64 characters of 48 bytes.
 #[inline]
 #[target_feature(enable = "avx512vbmi")]
-fn encode_vector(bytes: __m512i) -> __m512i {
+fn encode_vector(bytes: __m512i, url: bool) -> __m512i {
     let spread = _mm512_permutexvar_epi8(vector(&SPREAD), bytes);
     let sextets = _mm512_multishift_epi64_epi8(_mm512_set1_epi64(0x3036_242a_1016_040a), spread);
-    _mm512_permutexvar_epi8(sextets, vector(ALPHABET))
+    _mm512_permutexvar_epi8(sextets, vector(ALPHABETS[url as usize]))
 }
 
 #[target_feature(enable = "avx512vbmi")]
 fn vector(bytes: &[u8; 64]) -> __m512i {
     // SAFETY: the load reads the 64 bytes of `bytes`.
     unsafe { _mm512_loadu_si512(bytes.as_ptr().cast()) }
+}
+
+const fn decode_table(alphabet: &[u8; 64]) -> [[u8; 64]; 2] {
+    let mut table = [[128; 64]; 2];
+    let mut sextet = 0;
+
+    while sextet < 64 {
+        let ch = alphabet[sextet] as usize;
+        table[ch / 64][ch % 64] = sextet as u8;
+        sextet += 1;
+    }
+
+    table
 }
 
 /// The mask of a vector's first `len` bytes, `len` below 64.
@@ -257,28 +266,30 @@ mod tests {
         }
 
         // SAFETY: AVX-512 VBMI was detected above.
-        check_decode_kernel(|chars, split, out| unsafe {
-            run(decode::<66, 48>(chars, split, out))
+        check_decode_kernel(|chars, split, out, url| unsafe {
+            run(decode::<66, 48>(chars, split, out, url))
         });
         // SAFETY: AVX-512 VBMI was detected above.
-        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 48]| unsafe {
-            let mut wide = [MaybeUninit::new(0); 64];
-            let read = run(decode::<66, 64>(chars, split, &mut wide));
-            out.copy_from_slice(&wide[..48]);
-            read
-        });
-        // SAFETY: AVX-512 VBMI was detected above.
-        check_encode_kernel(
-            0,
-            |window: &[u8; 64], split, out: &mut [MaybeUninit<u8>; 66]| unsafe {
-                encode(window, split, [out])
+        check_decode_kernel(
+            |chars, split, out: &mut [MaybeUninit<u8>; 48], url| unsafe {
+                let mut wide = [MaybeUninit::new(0); 64];
+                let read = run(decode::<66, 64>(chars, split, &mut wide, url));
+                out.copy_from_slice(&wide[..48]);
+                read
             },
         );
         // SAFETY: AVX-512 VBMI was detected above.
         check_encode_kernel(
             0,
-            |bytes: &[u8; 48], split, out: &mut [MaybeUninit<u8>; 66]| unsafe {
-                encode(bytes, split, [out])
+            |window: &[u8; 64], split, out: &mut [MaybeUninit<u8>; 66], url| unsafe {
+                encode(window, split, [out], url)
+            },
+        );
+        // SAFETY: AVX-512 VBMI was detected above.
+        check_encode_kernel(
+            0,
+            |bytes: &[u8; 48], split, out: &mut [MaybeUninit<u8>; 66], url| unsafe {
+                encode(bytes, split, [out], url)
             },
         );
     }

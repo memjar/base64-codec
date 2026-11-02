@@ -1,9 +1,10 @@
 //! # Encoding
 //!
-//! Padded base64, unwrapped as RFC 2047 B words need, or in lines of 76
-//! characters each ended by CRLF or LF, the last one included, as MIME bodies
-//! need: chunk by chunk with [`Base64Encode`], at once with
-//! [`Base64Codec::encode`]. Decoding is the sibling [`decode`](crate::decode).
+//! Base64 in either alphabet, padded or not, unwrapped as RFC 2047 B words
+//! and URL tokens need, or in lines of 76 characters each ended by CRLF or
+//! LF, the last one included, as MIME bodies need: chunk by chunk with
+//! [`Base64Encode`], at once with [`Base64Codec::encode`]. Decoding is the
+//! sibling [`decode`](crate::decode).
 
 use core::mem::MaybeUninit;
 
@@ -41,11 +42,12 @@ pub struct Base64Encode {
 }
 
 impl Base64Encode {
-    /// An encoder with the backend and line ending of `codec`.
+    /// An encoder with the backend, alphabet, padding and line ending of
+    /// `codec`.
     pub fn new(codec: Base64Codec) -> Self {
         Self {
             cpu: codec.cpu,
-            state: EncodeState::new(codec.eol()),
+            state: EncodeState::new(codec),
         }
     }
 
@@ -56,7 +58,7 @@ impl Base64Encode {
         Base64EncodeOutput { read, written }
     }
 
-    /// Ends the input with the padded last group and line ending, at most
+    /// Ends the input with the last group and line ending, at most
     /// six bytes, or returns none, writing nothing, when `dst` is too short.
     pub fn finish(&mut self, dst: &mut [u8]) -> Option<usize> {
         scalar::encode_finish(&mut self.state, driver::uninit(dst))
@@ -68,7 +70,7 @@ impl Base64Encode {
         let (mut read, mut written) = scalar::encode_bytes(state, &src[..lead], dst);
 
         if read == lead && state.carried == 0 && state.column == 0 {
-            let loops = self.cpu.loops();
+            let loops = self.cpu.loops(state.url);
 
             if state.eol.is_empty() {
                 // SAFETY: the token names a backend the CPU supports.
@@ -129,21 +131,28 @@ impl Base64Codec {
     /// The bytes [`encode`](Self::encode) writes for an input of `len` bytes,
     /// or none when that overflows `usize`.
     pub fn encoded_len(self, len: usize) -> Option<usize> {
-        let chars = len.div_ceil(3).checked_mul(4)?;
+        let groups = len.div_ceil(3);
+
+        let chars = match self.pad {
+            true => groups.checked_mul(4)?,
+            false => len.checked_add(groups)?,
+        };
+
         let lines = chars.div_ceil(LINE);
         chars.checked_add(lines.checked_mul(self.eol().len())?)
     }
 
     /// `encode` into a `dst` of `encoded_len` bytes or more.
     fn encode_all(self, src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
-        let loops = self.cpu.loops();
+        let loops = self.cpu.loops(self.url());
         let eol = self.eol();
 
         if eol.is_empty() {
             // SAFETY: the token names a backend the CPU supports.
             let bytes = unsafe { (loops.encode_run)(src, dst) };
             let written = bytes / 3 * 4;
-            return written + scalar::encode_tail(&src[bytes..], &mut dst[written..]);
+            return written
+                + scalar::encode_tail(&src[bytes..], &mut dst[written..], self.url(), self.pad);
         }
 
         // SAFETY: as above.
@@ -154,7 +163,12 @@ impl Base64Codec {
         // SAFETY: as above.
         let bytes = unsafe { (loops.encode_run)(&src[read..], &mut dst[start..]) };
         let mut written = start + bytes / 3 * 4;
-        written += scalar::encode_tail(&src[read + bytes..], &mut dst[written..]);
+        written += scalar::encode_tail(
+            &src[read + bytes..],
+            &mut dst[written..],
+            self.url(),
+            self.pad,
+        );
 
         if written == start {
             return written;
@@ -169,15 +183,34 @@ impl Base64Codec {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use crate::{codec::Base64Eol, cpu::available, encode::*};
+    use crate::{
+        codec::{Base64Alphabet, Base64Eol},
+        cpu::available,
+        encode::*,
+    };
 
     const CRLF: Option<Base64Eol> = Some(Base64Eol::Crlf);
 
+    const UNPADDED: Base64Codec = Base64Codec {
+        pad: false,
+        ..Base64Codec::BASELINE
+    };
+
     fn encoded(input: &[u8], wrap: Option<Base64Eol>) -> Vec<u8> {
+        encoded_as(
+            input,
+            Base64Codec {
+                wrap,
+                ..Base64Codec::BASELINE
+            },
+        )
+    }
+
+    fn encoded_as(input: &[u8], style: Base64Codec) -> Vec<u8> {
         let results: Vec<Vec<u8>> = available()
             .into_iter()
             .map(|cpu| {
-                let codec = Base64Codec { cpu, wrap };
+                let codec = Base64Codec { cpu, ..style };
                 let mut out = vec![0; codec.encoded_len(input.len()).unwrap()];
                 let written = codec.encode(input, &mut out).unwrap();
                 assert_eq!(written, out.len());
@@ -202,6 +235,46 @@ mod tests {
         ] {
             assert_eq!(encoded(decoded, None), encoded_chars);
         }
+    }
+
+    #[test]
+    fn the_url_alphabet_writes_62_and_63() {
+        let url = Base64Codec {
+            alphabet: Base64Alphabet::Url,
+            ..Base64Codec::BASELINE
+        };
+
+        assert_eq!(encoded(&[0xfb, 0xff, 0xbf], None), b"+/+/");
+        assert_eq!(encoded_as(&[0xfb, 0xff, 0xbf], url), b"-_-_");
+        assert_eq!(
+            encoded_as(&[0xfb, 0xff, 0xbf].repeat(40), url),
+            b"-_-_".repeat(40)
+        );
+    }
+
+    #[test]
+    fn rfc4648_vectors_encode_unpadded() {
+        for (decoded, encoded_chars) in [
+            (&b"f"[..], &b"Zg"[..]),
+            (b"fo", b"Zm8"),
+            (b"foo", b"Zm9v"),
+            (b"foob", b"Zm9vYg"),
+            (b"fooba", b"Zm9vYmE"),
+        ] {
+            assert_eq!(encoded_as(decoded, UNPADDED), encoded_chars);
+        }
+    }
+
+    #[test]
+    fn one_byte_past_a_full_line_unpadded() {
+        let out = encoded_as(
+            &[b'x'; 58],
+            Base64Codec {
+                wrap: CRLF,
+                ..UNPADDED
+            },
+        );
+        assert_eq!(&out[76..], b"\r\neA\r\n");
     }
 
     #[test]
@@ -237,7 +310,11 @@ mod tests {
         let input: Vec<u8> = (0..200).collect();
 
         for cpu in available() {
-            let mut encoder = Base64Encode::new(Base64Codec { cpu, wrap: CRLF });
+            let mut encoder = Base64Encode::new(Base64Codec {
+                cpu,
+                wrap: CRLF,
+                ..Base64Codec::BASELINE
+            });
             let mut src = &input[..];
             let mut out = Vec::new();
             let mut room = [0; 6];
@@ -274,7 +351,12 @@ mod tests {
 
         for cpu in available() {
             let mut out = b"> ".to_vec();
-            Base64Codec { cpu, wrap: CRLF }.encode_vec(&input, &mut out);
+            Base64Codec {
+                cpu,
+                wrap: CRLF,
+                ..Base64Codec::BASELINE
+            }
+            .encode_vec(&input, &mut out);
             assert_eq!(&out[..2], b"> ");
             assert_eq!(out[2..], encoded(&input, CRLF));
         }

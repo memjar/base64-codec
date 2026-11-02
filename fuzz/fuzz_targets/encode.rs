@@ -1,10 +1,11 @@
-//! Every backend encodes any input, one-shot or resumed over any chunks and
-//! room, to the characters of scalar, which decode back clean.
+//! Every backend encodes any input in either alphabet, padded or not,
+//! one-shot or resumed over any chunks and room, to the characters of
+//! scalar, which decode back clean.
 
 #![no_main]
 
 use base64_codec::{
-    codec::{Base64Codec, Base64Eol},
+    codec::{Base64Alphabet, Base64Codec, Base64Eol},
     cpu::Base64Cpu,
     encode::Base64Encode,
 };
@@ -22,11 +23,23 @@ fuzz_target!(|data: &[u8]| {
         _ => Some(Base64Eol::Lf),
     };
 
+    let alphabet = match options / 3 % 2 {
+        0 => Base64Alphabet::Standard,
+        _ => Base64Alphabet::Url,
+    };
+
+    let pad = options / 6 % 2 == 0;
+
     let chunk = *chunk as usize + 1;
     let room = *room as usize % 64 + 6;
 
-    let cpu = Base64Cpu::new(SimdCpu::NONE);
-    let scalar = Base64Codec { cpu, wrap };
+    let scalar = Base64Codec {
+        cpu: Base64Cpu::new(SimdCpu::NONE),
+        alphabet,
+        pad,
+        wrap,
+    };
+
     let expected = one_shot(input, scalar);
 
     let mut decoded = vec![0; scalar.decoded_len_max(expected.len())];
@@ -35,7 +48,7 @@ fuzz_target!(|data: &[u8]| {
     assert!(output.clean);
 
     for cpu in cpus() {
-        let codec = Base64Codec { cpu, wrap };
+        let codec = Base64Codec { cpu, ..scalar };
         assert_eq!(one_shot(input, codec), expected, "{codec:?}");
 
         let mut encoder = Base64Encode::new(codec);

@@ -91,34 +91,40 @@ macro_rules! base64_driver {
             narrow: $encode_narrow:path $(,)?
         ) $(,)?
     ) => {
-        pub(crate) const LOOPS: crate::driver::Loops = crate::driver::Loops {
-            decode_run,
-            decode_lines: [
-                decode_lines::<{ $chars + 1 }, { $chars / 4 * 77 }>,
-                decode_lines::<{ $chars + 2 }, { $chars / 4 * 78 }>,
-            ],
-            encode_run,
-            encode_lines: [
-                encode_lines::<{ $bytes / 3 * 4 + 1 }, { $bytes / 3 * 77 }>,
-                encode_lines::<{ $bytes / 3 * 4 + 2 }, { $bytes / 3 * 78 }>,
-            ],
-        };
+        /// The loops of the standard alphabet, then of the URL one.
+        pub(crate) const LOOPS: [crate::driver::Loops; 2] = [loops::<false>(), loops::<true>()];
+
+        const fn loops<const URL: bool>() -> crate::driver::Loops {
+            crate::driver::Loops {
+                decode_run: decode_run::<URL>,
+                decode_lines: [
+                    decode_lines::<URL, { $chars + 1 }, { $chars / 4 * 77 }>,
+                    decode_lines::<URL, { $chars + 2 }, { $chars / 4 * 78 }>,
+                ],
+                encode_run: encode_run::<URL>,
+                encode_lines: [
+                    encode_lines::<URL, { $bytes / 3 * 4 + 1 }, { $bytes / 3 * 77 }>,
+                    encode_lines::<URL, { $bytes / 3 * 4 + 2 }, { $bytes / 3 * 78 }>,
+                ],
+            }
+        }
 
         $(#[$attr])*
-        pub(crate) fn decode_run(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
+        #[inline(never)]
+        pub(crate) fn decode_run<const URL: bool>(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             let chars = (src.len() / 4).min(dst.len() / 3) * 4;
 
             if chars < $chars {
-                return $decode_narrow(src, dst);
+                return $decode_narrow(src, dst, URL);
             }
 
-            decode_blocks(&src[..chars], dst)
+            decode_blocks::<URL>(&src[..chars], dst)
         }
 
         /// `decode_run` from a block on: four-block groups, then single blocks.
         $(#[$attr])*
         #[inline(never)]
-        fn decode_blocks(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
+        fn decode_blocks<const URL: bool>(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             const WIDE: usize = $chars;
             const BYTES: usize = WIDE / 4 * 3;
             const UNROLL: usize = 4;
@@ -143,7 +149,7 @@ macro_rules! base64_driver {
                         return at;
                     };
 
-                    let found = $decode(chars, WIDE, bytes);
+                    let found = $decode(chars, WIDE, bytes, URL);
 
                     if Bad::EAGER && found.any() {
                         break 'groups;
@@ -169,7 +175,7 @@ macro_rules! base64_driver {
                     return at;
                 };
 
-                let bad = $decode(block, WIDE, bytes);
+                let bad = $decode(block, WIDE, bytes, URL);
 
                 if bad.any() {
                     return start + bad.first();
@@ -185,7 +191,7 @@ macro_rules! base64_driver {
         /// `SPAN` bytes a period.
         $(#[$attr])*
         #[inline(never)]
-        fn decode_lines<const C: usize, const SPAN: usize>(
+        fn decode_lines<const URL: bool, const C: usize, const SPAN: usize>(
             src: &[u8],
             dst: &mut [core::mem::MaybeUninit<u8>],
         ) -> usize {
@@ -199,7 +205,7 @@ macro_rules! base64_driver {
             let lines = (src.len() / span).min(dst.len() / LEN);
 
             if WIDE >= 32 && lines >= LINES {
-                return decode_periods::<C, SPAN>(src, dst, lines);
+                return decode_periods::<URL, C, SPAN>(src, dst, lines);
             }
 
             for (line, chars) in src.chunks_exact(span).take(lines).enumerate() {
@@ -208,7 +214,7 @@ macro_rules! base64_driver {
                 }
 
                 let Some(out) = dst.get_mut(line * LEN..line * LEN + LEN + $spare) else {
-                    return line + (decode_blocks(&chars[..LINE], &mut dst[line * LEN..]) == LINE) as usize;
+                    return line + (decode_blocks::<URL>(&chars[..LINE], &mut dst[line * LEN..]) == LINE) as usize;
                 };
 
                 let mut bad = Bad::none();
@@ -221,7 +227,7 @@ macro_rules! base64_driver {
                         return line;
                     };
 
-                    let found = $decode(block, WIDE, bytes);
+                    let found = $decode(block, WIDE, bytes, URL);
 
                     if Bad::EAGER && found.any() {
                         return line;
@@ -241,7 +247,7 @@ macro_rules! base64_driver {
         /// `decode_lines` over the first `lines` lines, whole periods first.
         $(#[$attr])*
         #[inline(never)]
-        fn decode_periods<const C: usize, const SPAN: usize>(
+        fn decode_periods<const URL: bool, const C: usize, const SPAN: usize>(
             src: &[u8],
             dst: &mut [core::mem::MaybeUninit<u8>],
             lines: usize,
@@ -279,7 +285,7 @@ macro_rules! base64_driver {
                         break 'periods;
                     };
 
-                    let found = $decode(window, split, bytes);
+                    let found = $decode(window, split, bytes, URL);
 
                     if Bad::EAGER && found.any() {
                         break 'periods;
@@ -296,25 +302,26 @@ macro_rules! base64_driver {
             }
 
             let rest = (lines - done).min(LINES - 1);
-            done + decode_lines::<C, SPAN>(&src[done * span..(done + rest) * span], &mut dst[done * LEN..])
+            done + decode_lines::<URL, C, SPAN>(&src[done * span..(done + rest) * span], &mut dst[done * LEN..])
         }
 
         $(#[$attr])*
-        pub(crate) fn encode_run(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
+        #[inline(never)]
+        pub(crate) fn encode_run<const URL: bool>(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             let bytes = (src.len() / 3).min(dst.len() / 4) * 3;
 
             if bytes < $bytes {
-                return $encode_narrow(src, dst);
+                return $encode_narrow(src, dst, URL);
             }
 
-            encode_blocks(&src[..bytes], dst)
+            encode_blocks::<URL>(&src[..bytes], dst)
         }
 
         /// `encode_run` from a block on: steps of four blocks, from the first
         /// cache line for 64-character blocks, then single ones.
         $(#[$attr])*
         #[inline(never)]
-        fn encode_blocks(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
+        fn encode_blocks<const URL: bool>(src: &[u8], dst: &mut [core::mem::MaybeUninit<u8>]) -> usize {
             const BYTES: usize = $bytes;
             const CHARS: usize = BYTES / 3 * 4;
             const UNROLL: usize = 4;
@@ -328,7 +335,7 @@ macro_rules! base64_driver {
                 return 0;
             };
 
-            $encode(group, CHARS, [chars]);
+            $encode(group, CHARS, [chars], URL);
 
             let lag = match dst.as_ptr().addr().wrapping_neg() % 64 {
                 lag if CHARS == 64 && bytes > STEP && lag % 4 == 0 && lag > 0 => lag,
@@ -346,7 +353,7 @@ macro_rules! base64_driver {
                     break;
                 };
 
-                $encode(windows, CHARS, outs.each_mut());
+                $encode(windows, CHARS, outs.each_mut(), URL);
                 at += STEP;
             }
 
@@ -355,8 +362,8 @@ macro_rules! base64_driver {
                 let window = start.checked_sub($lead).and_then(|lead| src[lead..].first_chunk::<$window>());
 
                 match (window, src[start..].first_chunk::<BYTES>(), dst[start / 3 * 4..].first_chunk_mut::<CHARS>()) {
-                    (Some(window), _, Some(chars)) => $encode(window, CHARS, [chars]),
-                    (None, Some(group), Some(chars)) => $encode(group, CHARS, [chars]),
+                    (Some(window), _, Some(chars)) => $encode(window, CHARS, [chars], URL),
+                    (None, Some(group), Some(chars)) => $encode(group, CHARS, [chars], URL),
                     _ => return at,
                 }
 
@@ -370,7 +377,7 @@ macro_rules! base64_driver {
         /// `SPAN` bytes a period.
         $(#[$attr])*
         #[inline(never)]
-        fn encode_lines<const N: usize, const SPAN: usize>(
+        fn encode_lines<const URL: bool, const N: usize, const SPAN: usize>(
             src: &[u8],
             dst: &mut [core::mem::MaybeUninit<u8>],
         ) -> usize {
@@ -385,7 +392,7 @@ macro_rules! base64_driver {
             let lines = (src.len() / LEN).min(dst.len() / span);
 
             if lines >= LINES {
-                return encode_periods::<N, SPAN>(src, dst, lines);
+                return encode_periods::<URL, N, SPAN>(src, dst, lines);
             }
 
             let (whole, _) = src.as_chunks::<LEN>();
@@ -399,7 +406,7 @@ macro_rules! base64_driver {
                         return 0;
                     };
 
-                    $encode(group, CHARS, [chars]);
+                    $encode(group, CHARS, [chars], URL);
                 }
 
                 crate::scalar::write_eol(&mut out[LINE..], eol);
@@ -411,7 +418,7 @@ macro_rules! base64_driver {
         /// `encode_lines` over the first `lines` lines, whole periods first.
         $(#[$attr])*
         #[inline(never)]
-        fn encode_periods<const N: usize, const SPAN: usize>(
+        fn encode_periods<const URL: bool, const N: usize, const SPAN: usize>(
             src: &[u8],
             dst: &mut [core::mem::MaybeUninit<u8>],
             lines: usize,
@@ -442,14 +449,14 @@ macro_rules! base64_driver {
                     };
 
                     match window {
-                        Some(window) => $encode(window, split, [chars]),
-                        None => $encode(group, split, [chars]),
+                        Some(window) => $encode(window, split, [chars], URL),
+                        None => $encode(group, split, [chars], URL),
                     }
                 });
             }
 
             let done = periods.len() * LINES;
-            done + encode_lines::<N, SPAN>(&src[done * LEN..lines * LEN], &mut dst[done * span..])
+            done + encode_lines::<URL, N, SPAN>(&src[done * LEN..lines * LEN], &mut dst[done * span..])
         }
     };
 }
@@ -459,7 +466,7 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use crate::{
-        codec::{Base64Codec, Base64Eol},
+        codec::{Base64Alphabet, Base64Codec, Base64Eol},
         cpu::available,
         decode::Base64Decode,
         driver::uninit,
@@ -468,6 +475,25 @@ mod tests {
     };
 
     const WRAPS: [Option<Base64Eol>; 3] = [None, Some(Base64Eol::Crlf), Some(Base64Eol::Lf)];
+
+    /// Every alphabet and padding, with the scalar backend.
+    const STYLES: [Base64Codec; 4] = {
+        let standard = Base64Codec::BASELINE;
+        let url = Base64Codec {
+            alphabet: Base64Alphabet::Url,
+            ..standard
+        };
+
+        [
+            standard,
+            Base64Codec {
+                pad: false,
+                ..standard
+            },
+            url,
+            Base64Codec { pad: false, ..url },
+        ]
+    };
 
     struct Rng(u64);
 
@@ -484,9 +510,9 @@ mod tests {
         }
     }
 
-    fn reference_decode(src: &[u8]) -> (Vec<u8>, bool) {
-        let mut state = DecodeState::new();
-        let mut out = vec![0; Base64Codec::BASELINE.decoded_len_max(src.len())];
+    fn reference_decode(src: &[u8], codec: Base64Codec) -> (Vec<u8>, bool) {
+        let mut state = DecodeState::new(codec.url());
+        let mut out = vec![0; codec.decoded_len_max(src.len())];
         let (mut read, mut written) = (0, 0);
 
         loop {
@@ -506,19 +532,8 @@ mod tests {
         (out, state.clean)
     }
 
-    fn reference_encode(src: &[u8], wrap: Option<Base64Eol>) -> Vec<u8> {
-        let eol: &'static [u8] = match wrap {
-            None => b"",
-            Some(Base64Eol::Crlf) => b"\r\n",
-            Some(Base64Eol::Lf) => b"\n",
-        };
-
-        let codec = Base64Codec {
-            wrap,
-            ..Base64Codec::BASELINE
-        };
-
-        let mut state = EncodeState::new(eol);
+    fn reference_encode(src: &[u8], codec: Base64Codec) -> Vec<u8> {
+        let mut state = EncodeState::new(codec);
         let mut out = vec![0; codec.encoded_len(src.len()).unwrap()];
         let (_, written) = scalar::encode_bytes(&mut state, src, uninit(&mut out));
         let end = scalar::encode_finish(&mut state, uninit(&mut out[written..])).unwrap();
@@ -567,33 +582,39 @@ mod tests {
             let input = rng.bytes(len);
 
             for wrap in WRAPS {
-                let expected = reference_encode(&input, wrap);
-                assert_eq!(reference_decode(&expected), (input.clone(), true));
+                for style in STYLES {
+                    let reference = Base64Codec { wrap, ..style };
+                    let expected = reference_encode(&input, reference);
+                    assert_eq!(
+                        reference_decode(&expected, reference),
+                        (input.clone(), true)
+                    );
 
-                let mut variants = vec![
-                    expected.clone(),
-                    rewrapped(&expected, 64, b"\r\n"),
-                    rewrapped(&expected, 60, b"\n"),
-                    rewrapped(&expected, 72, b" \r\n"),
-                ];
+                    let mut variants = vec![
+                        expected.clone(),
+                        rewrapped(&expected, 64, b"\r\n"),
+                        rewrapped(&expected, 60, b"\n"),
+                        rewrapped(&expected, 72, b" \r\n"),
+                    ];
 
-                if !expected.is_empty() {
-                    let mut stray = expected.clone();
-                    let at = rng.next() as usize % stray.len();
-                    stray.insert(at, rng.next() as u8);
-                    variants.push(stray);
-                }
+                    if !expected.is_empty() {
+                        let mut stray = expected.clone();
+                        let at = rng.next() as usize % stray.len();
+                        stray.insert(at, rng.next() as u8);
+                        variants.push(stray);
+                    }
 
-                for cpu in available() {
-                    let codec = Base64Codec { cpu, wrap };
-                    assert_eq!(one_shot_encode(&input, codec), expected, "{codec:?} {len}");
+                    for cpu in available() {
+                        let codec = Base64Codec { cpu, ..reference };
+                        assert_eq!(one_shot_encode(&input, codec), expected, "{codec:?} {len}");
 
-                    for variant in &variants {
-                        assert_eq!(
-                            one_shot_decode(variant, codec),
-                            reference_decode(variant),
-                            "{codec:?} {len}"
-                        );
+                        for variant in &variants {
+                            assert_eq!(
+                                one_shot_decode(variant, codec),
+                                reference_decode(variant, reference),
+                                "{codec:?} {len}"
+                            );
+                        }
                     }
                 }
             }
@@ -603,23 +624,30 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_byte_at_every_position_matches_the_reference() {
-        let run = reference_encode(&Rng(7).bytes(120), None);
-        let lines = reference_encode(&Rng(7).bytes(171), Some(Base64Eol::Crlf));
+        for style in [STYLES[0], STYLES[2]] {
+            let crlf = Base64Codec {
+                wrap: Some(Base64Eol::Crlf),
+                ..style
+            };
 
-        for line in [run, lines] {
-            for byte in 0..=255 {
-                for at in 0..line.len() {
-                    let mut input = line.clone();
-                    input[at] = byte;
-                    let expected = reference_decode(&input);
+            let run = reference_encode(&Rng(7).bytes(120), style);
+            let lines = reference_encode(&Rng(7).bytes(171), crlf);
 
-                    for cpu in available() {
-                        let codec = Base64Codec { cpu, wrap: None };
-                        assert_eq!(
-                            one_shot_decode(&input, codec),
-                            expected,
-                            "{cpu:?} {byte} {at}"
-                        );
+            for line in [run, lines] {
+                for byte in 0..=255 {
+                    for at in 0..line.len() {
+                        let mut input = line.clone();
+                        input[at] = byte;
+                        let expected = reference_decode(&input, style);
+
+                        for cpu in available() {
+                            let codec = Base64Codec { cpu, ..style };
+                            assert_eq!(
+                                one_shot_decode(&input, codec),
+                                expected,
+                                "{codec:?} {byte} {at}"
+                            );
+                        }
                     }
                 }
             }
@@ -629,38 +657,38 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_short_end_matches_the_reference() {
-        const BYTES: &[u8; 7] = b"Qz=\r\n *";
+        for (style, bytes) in [(STYLES[0], b"Qz=\r\n *"), (STYLES[2], b"Q_=\r\n +")] {
+            for len in 0..=6_u32 {
+                for mut code in 0..bytes.len().pow(len) {
+                    let end: Vec<u8> = (0..len)
+                        .map(|_| {
+                            let byte = bytes[code % bytes.len()];
+                            code /= bytes.len();
+                            byte
+                        })
+                        .collect();
 
-        for len in 0..=6_u32 {
-            for mut code in 0..BYTES.len().pow(len) {
-                let end: Vec<u8> = (0..len)
-                    .map(|_| {
-                        let byte = BYTES[code % BYTES.len()];
-                        code /= BYTES.len();
-                        byte
-                    })
-                    .collect();
+                    for prefix in [&b""[..], b"QUJD", b"QUJD\r\n"] {
+                        let input = [prefix, &end].concat();
+                        let expected = reference_decode(&input, style);
 
-                for prefix in [&b""[..], b"QUJD", b"QUJD\r\n"] {
-                    let input = [prefix, &end].concat();
-                    let expected = reference_decode(&input);
+                        for cpu in available() {
+                            let codec = Base64Codec { cpu, ..style };
+                            assert_eq!(
+                                one_shot_decode(&input, codec),
+                                expected,
+                                "{codec:?} {input:?}"
+                            );
 
-                    for cpu in available() {
-                        let codec = Base64Codec { cpu, wrap: None };
-                        assert_eq!(
-                            one_shot_decode(&input, codec),
-                            expected,
-                            "{cpu:?} {input:?}"
-                        );
-
-                        let mut decoder = Base64Decode::new(codec);
-                        let mut out = vec![0; codec.decoded_len_max(input.len())];
-                        let first = decoder.resume(prefix, &mut out);
-                        let second = decoder.resume(&end, &mut out[first.written..]);
-                        let written = first.written + second.written;
-                        let last = decoder.finish(&mut out[written..]).unwrap();
-                        out.truncate(written + last.written);
-                        assert_eq!((out, last.clean), expected, "{cpu:?} {input:?} resumed");
+                            let mut decoder = Base64Decode::new(codec);
+                            let mut out = vec![0; codec.decoded_len_max(input.len())];
+                            let first = decoder.resume(prefix, &mut out);
+                            let second = decoder.resume(&end, &mut out[first.written..]);
+                            let written = first.written + second.written;
+                            let last = decoder.finish(&mut out[written..]).unwrap();
+                            out.truncate(written + last.written);
+                            assert_eq!((out, last.clean), expected, "{codec:?} {input:?} resumed");
+                        }
                     }
                 }
             }
@@ -674,37 +702,40 @@ mod tests {
         let input = rng.bytes(300);
 
         for wrap in WRAPS {
-            let encoded = reference_encode(&input, wrap);
-            let mut dirty = encoded.clone();
-            dirty.insert(100, b'*');
-            dirty.extend_from_slice(b"=Zg");
+            for style in STYLES {
+                let reference = Base64Codec { wrap, ..style };
+                let encoded = reference_encode(&input, reference);
+                let mut dirty = encoded.clone();
+                dirty.insert(100, b'*');
+                dirty.extend_from_slice(b"=Zg");
 
-            for cpu in available() {
-                let codec = Base64Codec { cpu, wrap };
+                for cpu in available() {
+                    let codec = Base64Codec { cpu, ..reference };
 
-                for at in 0..=input.len() {
-                    let mut encoder = Base64Encode::new(codec);
-                    let mut out = vec![0; encoded.len()];
-                    let first = encoder.resume(&input[..at], &mut out);
-                    let second = encoder.resume(&input[at..], &mut out[first.written..]);
-                    let written = first.written + second.written;
-                    let end = encoder.finish(&mut out[written..]).unwrap();
-                    assert_eq!(written + end, encoded.len(), "{codec:?} {at}");
-                    assert_eq!(out, encoded, "{codec:?} {at}");
-                }
-
-                for source in [&encoded, &dirty] {
-                    let expected = reference_decode(source);
-
-                    for at in 0..=source.len() {
-                        let mut decoder = Base64Decode::new(codec);
-                        let mut out = vec![0; codec.decoded_len_max(source.len())];
-                        let first = decoder.resume(&source[..at], &mut out);
-                        let second = decoder.resume(&source[at..], &mut out[first.written..]);
+                    for at in 0..=input.len() {
+                        let mut encoder = Base64Encode::new(codec);
+                        let mut out = vec![0; encoded.len()];
+                        let first = encoder.resume(&input[..at], &mut out);
+                        let second = encoder.resume(&input[at..], &mut out[first.written..]);
                         let written = first.written + second.written;
-                        let end = decoder.finish(&mut out[written..]).unwrap();
-                        out.truncate(written + end.written);
-                        assert_eq!((out, end.clean), expected, "{codec:?} {at}");
+                        let end = encoder.finish(&mut out[written..]).unwrap();
+                        assert_eq!(written + end, encoded.len(), "{codec:?} {at}");
+                        assert_eq!(out, encoded, "{codec:?} {at}");
+                    }
+
+                    for source in [&encoded, &dirty] {
+                        let expected = reference_decode(source, reference);
+
+                        for at in 0..=source.len() {
+                            let mut decoder = Base64Decode::new(codec);
+                            let mut out = vec![0; codec.decoded_len_max(source.len())];
+                            let first = decoder.resume(&source[..at], &mut out);
+                            let second = decoder.resume(&source[at..], &mut out[first.written..]);
+                            let written = first.written + second.written;
+                            let end = decoder.finish(&mut out[written..]).unwrap();
+                            out.truncate(written + end.written);
+                            assert_eq!((out, end.clean), expected, "{codec:?} {at}");
+                        }
                     }
                 }
             }

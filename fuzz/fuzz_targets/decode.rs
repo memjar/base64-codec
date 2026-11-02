@@ -1,9 +1,14 @@
-//! Every backend decodes any input, one-shot or resumed over any chunks and
-//! room, to the bytes and flag of scalar, without panicking.
+//! Every backend decodes any input in either alphabet, one-shot or resumed
+//! over any chunks and room, to the bytes and flag of scalar, without
+//! panicking.
 
 #![no_main]
 
-use base64_codec::{codec::Base64Codec, cpu::Base64Cpu, decode::Base64Decode};
+use base64_codec::{
+    codec::{Base64Alphabet, Base64Codec},
+    cpu::Base64Cpu,
+    decode::Base64Decode,
+};
 use libfuzzer_sys::fuzz_target;
 use simd_cpu::{SimdCpu, SimdFeature};
 
@@ -13,20 +18,25 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let chunk = *chunk as usize + 1;
+
+    let alphabet = match room / 64 % 2 {
+        0 => Base64Alphabet::Standard,
+        _ => Base64Alphabet::Url,
+    };
+
     let room = *room as usize % 64 + 3;
 
-    let scalar = Base64Cpu::new(SimdCpu::NONE);
-    let expected = one_shot(
-        input,
-        Base64Codec {
-            cpu: scalar,
-            wrap: None,
-        },
-    );
+    let scalar = Base64Codec {
+        cpu: Base64Cpu::new(SimdCpu::NONE),
+        alphabet,
+        ..Base64Codec::BASELINE
+    };
+
+    let expected = one_shot(input, scalar);
 
     for cpu in cpus() {
-        let codec = Base64Codec { cpu, wrap: None };
-        assert_eq!(one_shot(input, codec), expected, "{cpu:?}");
+        let codec = Base64Codec { cpu, ..scalar };
+        assert_eq!(one_shot(input, codec), expected, "{codec:?}");
 
         let mut decoder = Base64Decode::new(codec);
         let mut out = Vec::new();
@@ -42,7 +52,7 @@ fuzz_target!(|data: &[u8]| {
 
         let end = decoder.finish(&mut buffer).unwrap();
         out.extend_from_slice(&buffer[..end.written]);
-        assert_eq!((out, end.clean), expected, "{cpu:?} resumed");
+        assert_eq!((out, end.clean), expected, "{codec:?} resumed");
     }
 });
 

@@ -33,10 +33,10 @@ No encoding or decoding function SHALL detect CPU features. A backend SHALL run 
 
 ### Requirement: Every backend matches scalar
 
-For every input and line ending, every backend SHALL write the same bytes and return the same clean flag as the scalar steps, in one-shot and resumed calls alike.
+For every input, alphabet, padding and line ending, every backend SHALL write the same bytes and return the same clean flag as the scalar steps, in one-shot and resumed calls alike.
 
 #### Scenario: Every length on an AVX-512 machine
-- GIVEN pseudo-random inputs of every length from 0 to 1,024, encoded unwrapped, with CRLF and with LF, and the same encodings rewrapped or with a stray byte inserted
+- GIVEN pseudo-random inputs of every length from 0 to 1,024, encoded unwrapped, with CRLF and with LF, under both alphabets, padded and not, and the same encodings rewrapped or with a stray byte inserted
 - WHEN they are encoded and decoded under AVX-512, AVX2, SSSE3 and scalar
 - THEN the four backends write identical bytes and flags
 

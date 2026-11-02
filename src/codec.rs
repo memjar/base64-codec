@@ -1,19 +1,26 @@
 //! # Codec
 //!
-//! [`Base64Codec`], the backend and line ending every call runs with; its
-//! one-shot methods are in [`encode`](crate::encode) and
+//! [`Base64Codec`], the backend, alphabet, padding and line ending every
+//! call runs with; its one-shot methods are in [`encode`](crate::encode) and
 //! [`decode`](crate::decode).
 
 use simd_cpu::SimdCpu;
 
 use crate::cpu::Base64Cpu;
 
-/// The backend and line ending every call runs with, a stateless value the
-/// application builds once.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+/// The backend, alphabet, padding and line ending every call runs with, a
+/// stateless value the application builds once.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Base64Codec {
     /// The backend every call runs.
     pub cpu: Base64Cpu,
+    /// The alphabet encoding writes and decoding takes.
+    pub alphabet: Base64Alphabet,
+    /// Whether encoding ends a partial quantum with `=`; decoding accepts
+    /// input with or without padding alike.
+    ///
+    /// Refs: <https://datatracker.ietf.org/doc/html/rfc4648#section-3.2>
+    pub pad: bool,
     /// The ending of 76-character encoded lines, or none for one unbroken
     /// run; decoding ignores it.
     ///
@@ -22,9 +29,12 @@ pub struct Base64Codec {
 }
 
 impl Base64Codec {
-    /// The build target's backend, unwrapped, needing no detection.
+    /// The build target's backend, the standard alphabet, padded and
+    /// unwrapped, needing no detection.
     pub const BASELINE: Self = Self {
         cpu: Base64Cpu::new(SimdCpu::BASELINE),
+        alphabet: Base64Alphabet::Standard,
+        pad: true,
         wrap: None,
     };
 
@@ -35,6 +45,31 @@ impl Base64Codec {
             Some(Base64Eol::Lf) => b"\n",
         }
     }
+
+    pub(crate) fn url(self) -> bool {
+        self.alphabet == Base64Alphabet::Url
+    }
+}
+
+impl Default for Base64Codec {
+    fn default() -> Self {
+        Self::BASELINE
+    }
+}
+
+/// The characters of the sextets 62 and 63, the others being `A` to `Z`,
+/// `a` to `z` and `0` to `9`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Base64Alphabet {
+    /// `+` and `/`, as mail needs.
+    ///
+    /// Refs: <https://datatracker.ietf.org/doc/html/rfc4648#section-4>
+    #[default]
+    Standard,
+    /// `-` and `_`, safe in URLs and file names, as OAuth and JWT need.
+    ///
+    /// Refs: <https://datatracker.ietf.org/doc/html/rfc4648#section-5>
+    Url,
 }
 
 /// The line ending of wrapped output.

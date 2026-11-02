@@ -8,7 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- Added `codec::Base64Codec`, the `Copy` value every call runs from: the backend (`cpu`) and the line ending of encoded output (`wrap`, unwrapped or lines of 76 characters ended by CRLF or LF), with `BASELINE` needing no detection.
+- Added `codec::Base64Codec`, the `Copy` value every call runs from: the backend (`cpu`), the alphabet (`alphabet`), whether encoding pads (`pad`) and the line ending of encoded output (`wrap`, unwrapped or lines of 76 characters ended by CRLF or LF), with `BASELINE` needing no detection.
+
+- Added `codec::Base64Alphabet`: the standard alphabet, or the URL one of RFC 4648 5 (`-` and `_`) for OAuth and JWT tokens, on every backend. Decoding takes the codec's alphabet alone, the other one's two symbols being stray bytes.
+
+- Added unpadded encoding, without `pad`; decoding accepts input with or without padding alike.
 
 - Added the one-shot `Base64Codec::encode` and `Base64Codec::decode`, and `encode_vec` and `decode_vec` behind the `alloc` feature.
 

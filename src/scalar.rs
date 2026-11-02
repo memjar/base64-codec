@@ -6,8 +6,13 @@
 
 use core::mem::MaybeUninit;
 
-pub(crate) const ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+use crate::codec::Base64Codec;
+
+/// The standard alphabet, then the URL one.
+pub(crate) const ALPHABETS: [&[u8; 64]; 2] = [
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+];
 
 pub(crate) const LINE: usize = 76;
 pub(crate) const LINE_BYTES: usize = LINE / 4 * 3;
@@ -21,13 +26,23 @@ const NEWLINE: u8 = 65;
 const BLANK: u8 = 66;
 const BAD: u8 = 67;
 
-/// Every byte's sextet, or its class outside the alphabet.
-static CLASSES: [u8; 256] = {
+/// Per alphabet, every byte's sextet, or its class outside the alphabet.
+static CLASSES: [[u8; 256]; 2] = [classes(ALPHABETS[0]), classes(ALPHABETS[1])];
+
+/// Per alphabet and position in a quantum, every byte's sextet in place in
+/// its 3 bytes, or the high byte set outside the alphabet: four lookups
+/// joined decode it.
+static QUANTA: [[[u32; 256]; 4]; 2] = [quanta(ALPHABETS[0]), quanta(ALPHABETS[1])];
+
+/// Per alphabet, the characters of every pair of sextets, the first one high.
+static PAIRS: [[[u8; 2]; 4096]; 2] = [pairs(ALPHABETS[0]), pairs(ALPHABETS[1])];
+
+const fn classes(alphabet: &[u8; 64]) -> [u8; 256] {
     let mut classes = [BAD; 256];
     let mut sextet = 0;
 
     while sextet < 64 {
-        classes[ALPHABET[sextet] as usize] = sextet as u8;
+        classes[alphabet[sextet] as usize] = sextet as u8;
         sextet += 1;
     }
 
@@ -37,11 +52,9 @@ static CLASSES: [u8; 256] = {
     classes[b' ' as usize] = BLANK;
     classes[b'\t' as usize] = BLANK;
     classes
-};
+}
 
-/// Per position in a quantum, every byte's sextet in place in its 3 bytes,
-/// or the high byte set outside the alphabet: four lookups joined decode it.
-static QUANTA: [[u32; 256]; 4] = {
+const fn quanta(alphabet: &[u8; 64]) -> [[u32; 256]; 4] {
     let mut quanta = [[0xff00_0000; 256]; 4];
     let mut sextet = 0;
 
@@ -49,7 +62,7 @@ static QUANTA: [[u32; 256]; 4] = {
         let mut at = 0;
 
         while at < 4 {
-            quanta[at][ALPHABET[sextet] as usize] = ((sextet as u32) << (26 - 6 * at)).swap_bytes();
+            quanta[at][alphabet[sextet] as usize] = ((sextet as u32) << (26 - 6 * at)).swap_bytes();
             at += 1;
         }
 
@@ -57,20 +70,19 @@ static QUANTA: [[u32; 256]; 4] = {
     }
 
     quanta
-};
+}
 
-/// The characters of every pair of sextets, the first one high.
-static PAIRS: [[u8; 2]; 4096] = {
+const fn pairs(alphabet: &[u8; 64]) -> [[u8; 2]; 4096] {
     let mut pairs = [[0; 2]; 4096];
     let mut at = 0;
 
     while at < 4096 {
-        pairs[at] = [ALPHABET[at >> 6], ALPHABET[at & 63]];
+        pairs[at] = [alphabet[at >> 6], alphabet[at & 63]];
         at += 1;
     }
 
     pairs
-};
+}
 
 base64_driver!(
     decode(
@@ -90,6 +102,7 @@ base64_driver!(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DecodeState {
+    pub(crate) url: bool,
     pub(crate) bits: u32,
     pub(crate) pending: u8,
     pub(crate) padded: bool,
@@ -97,8 +110,9 @@ pub(crate) struct DecodeState {
 }
 
 impl DecodeState {
-    pub(crate) const fn new() -> Self {
+    pub(crate) const fn new(url: bool) -> Self {
         Self {
+            url,
             bits: 0,
             pending: 0,
             padded: false,
@@ -113,15 +127,19 @@ pub(crate) struct EncodeState {
     pub(crate) carried: u8,
     pub(crate) column: u8,
     pub(crate) eol: &'static [u8],
+    pub(crate) url: bool,
+    pub(crate) pad: bool,
 }
 
 impl EncodeState {
-    pub(crate) const fn new(eol: &'static [u8]) -> Self {
+    pub(crate) fn new(codec: Base64Codec) -> Self {
         Self {
             carry: [0; 2],
             carried: 0,
             column: 0,
-            eol,
+            eol: codec.eol(),
+            url: codec.url(),
+            pad: codec.pad,
         }
     }
 
@@ -158,11 +176,14 @@ pub(crate) fn decode_bytes(
     dst: &mut [MaybeUninit<u8>],
 ) -> (usize, usize, bool) {
     let DecodeState {
+        url,
         mut bits,
         mut pending,
         mut padded,
         mut clean,
     } = *state;
+
+    let classes = &CLASSES[url as usize];
 
     let mut written = 0;
     let mut line_start = false;
@@ -173,7 +194,7 @@ pub(crate) fn decode_bytes(
                 break 'bytes (read, false);
             }
 
-            match CLASSES[byte as usize] {
+            match classes[byte as usize] {
                 PAD => padded = true,
                 NEWLINE | BLANK => {}
                 BAD => clean = false,
@@ -215,6 +236,7 @@ pub(crate) fn decode_bytes(
     };
 
     *state = DecodeState {
+        url,
         bits,
         pending,
         padded,
@@ -230,7 +252,7 @@ pub(crate) fn decode_tail(state: &mut DecodeState, symbols: &[u8], padded: bool)
     let mut bits = 0;
 
     for &byte in symbols {
-        let sextet = CLASSES[byte as usize];
+        let sextet = CLASSES[state.url as usize][byte as usize];
 
         if sextet >= PAD {
             return false;
@@ -310,7 +332,7 @@ pub(crate) fn encode_bytes(
         };
 
         let (chars, end) = out.split_at_mut(4);
-        encode_groups(&group, chars);
+        encode_groups(&group, chars, state.url);
 
         if !state.eol.is_empty() {
             state.column += 4;
@@ -328,7 +350,11 @@ pub(crate) fn encode_bytes(
 }
 
 pub(crate) fn encode_finish(state: &mut EncodeState, dst: &mut [MaybeUninit<u8>]) -> Option<usize> {
-    let chars = if state.carried == 0 { 0 } else { 4 };
+    let chars = match state.carried {
+        0 => 0,
+        _ if state.pad => 4,
+        carried => carried as usize + 1,
+    };
 
     let eol = if state.column as usize + chars == 0 {
         0
@@ -339,37 +365,57 @@ pub(crate) fn encode_finish(state: &mut EncodeState, dst: &mut [MaybeUninit<u8>]
     let out = dst.get_mut(..chars + eol)?;
     let (quantum, end) = out.split_at_mut(chars);
 
-    encode_tail(&state.carry[..state.carried as usize], quantum);
+    encode_tail(
+        &state.carry[..state.carried as usize],
+        quantum,
+        state.url,
+        state.pad,
+    );
     write_eol(end, state.eol);
     state.carried = 0;
     state.column = 0;
     Some(chars + eol)
 }
 
-/// Writes the padded quantum of the last one or two bytes, when it fits.
-pub(crate) fn encode_tail(tail: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
+/// Writes the quantum of the last one or two bytes, padded or not, when it
+/// fits.
+pub(crate) fn encode_tail(tail: &[u8], dst: &mut [MaybeUninit<u8>], url: bool, pad: bool) -> usize {
+    let alphabet = ALPHABETS[url as usize];
+
     let quantum = match *tail {
         [first] => [
-            ALPHABET[(first >> 2) as usize],
-            ALPHABET[(first << 4 & 63) as usize],
+            alphabet[(first >> 2) as usize],
+            alphabet[(first << 4 & 63) as usize],
             b'=',
             b'=',
         ],
         [first, second] => [
-            ALPHABET[(first >> 2) as usize],
-            ALPHABET[((first << 4 | second >> 4) & 63) as usize],
-            ALPHABET[(second << 2 & 63) as usize],
+            alphabet[(first >> 2) as usize],
+            alphabet[((first << 4 | second >> 4) & 63) as usize],
+            alphabet[(second << 2 & 63) as usize],
             b'=',
         ],
         _ => return 0,
     };
 
-    let Some(out) = dst.first_chunk_mut::<4>() else {
+    if pad {
+        let Some(out) = dst.first_chunk_mut::<4>() else {
+            return 0;
+        };
+
+        *out = quantum.map(MaybeUninit::new);
+        return 4;
+    }
+
+    let Some(out) = dst.get_mut(..tail.len() + 1) else {
         return 0;
     };
 
-    *out = quantum.map(MaybeUninit::new);
-    4
+    for (slot, char) in out.iter_mut().zip(quantum) {
+        slot.write(char);
+    }
+
+    out.len()
 }
 
 /// Writes `eol` at the start of `out` when it fits, without a copy call.
@@ -419,6 +465,7 @@ fn decode_block<const C: usize, const N: usize>(
     chars: &[u8; C],
     split: usize,
     out: &mut [MaybeUninit<u8>; N],
+    url: bool,
 ) -> Bad {
     let (quads, _) = chars.as_chunks::<4>();
     let mut bad = 0;
@@ -428,7 +475,7 @@ fn decode_block<const C: usize, const N: usize>(
             quad = chars[at * 4 + C - 16..].first_chunk().unwrap_or(quad);
         }
 
-        let word = quantum(quad);
+        let word = quantum(quad, url);
         let len = (N - at * 3).min(4);
         out[at * 3..at * 3 + len].copy_from_slice(&word.to_le_bytes().map(MaybeUninit::new)[..len]);
         bad |= (word >> 24) << (8 * at);
@@ -443,9 +490,10 @@ fn encode_block<const S: usize, const N: usize, const K: usize>(
     bytes: &[u8; S],
     split: usize,
     outs: [&mut [MaybeUninit<u8>; N]; K],
+    url: bool,
 ) {
     for (group, out) in bytes.as_chunks::<12>().0.iter().zip(outs) {
-        encode_groups(group, &mut out[..16]);
+        encode_groups(group, &mut out[..16], url);
 
         if N > 16 {
             crate::driver::spread(out, split, 16);
@@ -454,13 +502,13 @@ fn encode_block<const S: usize, const N: usize, const K: usize>(
 }
 
 /// `Loops::decode_run` quantum by quantum.
-pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
+pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>], url: bool) -> usize {
     let (quads, _) = src.as_chunks::<4>();
     let (outs, _) = dst.as_chunks_mut::<3>();
     let mut read = 0;
 
     for (quad, out) in quads.iter().zip(outs) {
-        let [first, second, third, bad] = quantum(quad).to_le_bytes();
+        let [first, second, third, bad] = quantum(quad, url).to_le_bytes();
 
         if bad != 0 {
             break;
@@ -475,14 +523,15 @@ pub(crate) fn decode_quanta(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
 
 /// `Loops::encode_run` two groups a step, a pair of sextets a lookup.
 #[inline]
-pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
+pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>], url: bool) -> usize {
+    let pairs = &PAIRS[url as usize];
     let (groups, _) = src.as_chunks::<6>();
     let (outs, _) = dst.as_chunks_mut::<8>();
     let mut read = 0;
 
     for (&[a, b, c, d, e, f], out) in groups.iter().zip(outs) {
         let bits = u64::from_be_bytes([0, 0, a, b, c, d, e, f]);
-        let [p, q, r, s] = [36, 24, 12, 0].map(|at| PAIRS[(bits >> at & 0xfff) as usize]);
+        let [p, q, r, s] = [36, 24, 12, 0].map(|at| pairs[(bits >> at & 0xfff) as usize]);
         *out = [p[0], p[1], q[0], q[1], r[0], r[1], s[0], s[1]].map(MaybeUninit::new);
         read += 6;
     }
@@ -492,7 +541,7 @@ pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
         dst[read / 3 * 4..].first_chunk_mut(),
     ) {
         let bits = u32::from_be_bytes([0, a, b, c]);
-        let [p, q] = [12, 0].map(|at| PAIRS[(bits >> at & 0xfff) as usize]);
+        let [p, q] = [12, 0].map(|at| pairs[(bits >> at & 0xfff) as usize]);
         *out = [p[0], p[1], q[0], q[1]].map(MaybeUninit::new);
         read += 3;
     }
@@ -502,8 +551,8 @@ pub(crate) fn encode_groups(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
 
 /// The 3 bytes of a quantum in a little-endian word, the high byte set when
 /// a character is outside the alphabet.
-fn quantum(&[a, b, c, d]: &[u8; 4]) -> u32 {
-    let [first, second, third, fourth] = &QUANTA;
+fn quantum(&[a, b, c, d]: &[u8; 4], url: bool) -> u32 {
+    let [first, second, third, fourth] = &QUANTA[url as usize];
     first[a as usize] | second[b as usize] | third[c as usize] | fourth[d as usize]
 }
 
@@ -525,57 +574,62 @@ fn flush(bits: u32, pending: u8, out: &mut [MaybeUninit<u8>]) -> Option<usize> {
     }
 }
 
-/// Checks a decode kernel against `decode_quanta` for every byte at every
-/// position, and for a stray byte around CRLF at every split.
+/// Checks a decode kernel against `decode_quanta` under both alphabets for
+/// every byte at every position, and for a stray byte around CRLF at every
+/// split.
 #[cfg(test)]
 pub(crate) fn check_decode_kernel<const S: usize, const B: usize>(
-    kernel: impl Fn(&[u8; S], usize, &mut [MaybeUninit<u8>; B]) -> usize,
+    kernel: impl Fn(&[u8; S], usize, &mut [MaybeUninit<u8>; B], bool) -> usize,
 ) {
-    let valid: alloc::vec::Vec<u8> = (0..S - 2).map(|at| ALPHABET[(at * 37 + 11) % 64]).collect();
-    let bytes = (0..S - 2).flat_map(|at| (0..=255).map(move |byte| (at, byte, S - 2)));
-    let splits = (4..S - 2)
-        .step_by(4)
-        .flat_map(|split| (0..=S - 2).map(move |at| (at, b'*', split)));
+    for url in [false, true] {
+        let valid: alloc::vec::Vec<u8> = (0..S - 2)
+            .map(|at| ALPHABETS[url as usize][(at * 37 + 11) % 64])
+            .collect();
+        let bytes = (0..S - 2).flat_map(|at| (0..=255).map(move |byte| (at, byte, S - 2)));
+        let splits = (4..S - 2)
+            .step_by(4)
+            .flat_map(|split| (0..=S - 2).map(move |at| (at, b'*', split)));
 
-    for (at, byte, split) in bytes.chain(splits) {
-        let mut chars = valid.clone();
+        for (at, byte, split) in bytes.chain(splits) {
+            let mut chars = valid.clone();
 
-        if let Some(slot) = chars.get_mut(at) {
-            *slot = byte;
+            if let Some(slot) = chars.get_mut(at) {
+                *slot = byte;
+            }
+
+            let window = [&chars[..split], b"\r\n", &chars[split..]].concat();
+            let mut out = [MaybeUninit::new(0); B];
+            let mut expected = [MaybeUninit::new(0); B];
+            let read = kernel(window.as_slice().try_into().unwrap(), split, &mut out, url);
+            assert_eq!(
+                read,
+                decode_quanta(&chars, &mut expected, url),
+                "{url} {byte} at {at}, {split}"
+            );
+
+            // SAFETY: every slot was initialised before the calls.
+            let (out, expected) = unsafe {
+                (
+                    out.map(|b| b.assume_init()),
+                    expected.map(|b| b.assume_init()),
+                )
+            };
+
+            assert_eq!(
+                out[..read / 4 * 3],
+                expected[..read / 4 * 3],
+                "{url} {byte} at {at}, {split}"
+            );
         }
-
-        let window = [&chars[..split], b"\r\n", &chars[split..]].concat();
-        let mut out = [MaybeUninit::new(0); B];
-        let mut expected = [MaybeUninit::new(0); B];
-        let read = kernel(window.as_slice().try_into().unwrap(), split, &mut out);
-        assert_eq!(
-            read,
-            decode_quanta(&chars, &mut expected),
-            "{byte} at {at}, {split}"
-        );
-
-        // SAFETY: every slot was initialised before the calls.
-        let (out, expected) = unsafe {
-            (
-                out.map(|b| b.assume_init()),
-                expected.map(|b| b.assume_init()),
-            )
-        };
-
-        assert_eq!(
-            out[..read / 4 * 3],
-            expected[..read / 4 * 3],
-            "{byte} at {at}, {split}"
-        );
     }
 }
 
-/// Checks an encode kernel against `encode_groups` for every byte at every
-/// position, and for CRLF at every split.
+/// Checks an encode kernel against `encode_groups` under both alphabets for
+/// every byte at every position, and for CRLF at every split.
 #[cfg(test)]
 pub(crate) fn check_encode_kernel<const W: usize, const N: usize>(
     lead: usize,
-    kernel: impl Fn(&[u8; W], usize, &mut [MaybeUninit<u8>; N]),
+    kernel: impl Fn(&[u8; W], usize, &mut [MaybeUninit<u8>; N], bool),
 ) {
     let chars = N - 2;
     let base: [u8; W] = core::array::from_fn(|at| (at * 73 + 5) as u8);
@@ -583,29 +637,28 @@ pub(crate) fn check_encode_kernel<const W: usize, const N: usize>(
     let splits = (4..chars).step_by(4).map(|split| (0, base[0], split));
 
     for (at, byte, split) in bytes.chain(splits) {
-        let mut bytes = base;
-        bytes[at] = byte;
+        for url in [false, true] {
+            let mut bytes = base;
+            bytes[at] = byte;
 
-        let mut out = [MaybeUninit::new(0); N];
-        let mut expected = [MaybeUninit::new(0); N];
-        kernel(&bytes, split, &mut out);
-        encode_groups(&bytes[lead..lead + chars / 4 * 3], &mut expected);
+            let mut out = [MaybeUninit::new(0); N];
+            let mut expected = [MaybeUninit::new(0); N];
+            kernel(&bytes, split, &mut out, url);
+            encode_groups(&bytes[lead..lead + chars / 4 * 3], &mut expected, url);
 
-        // SAFETY: every slot was initialised before the calls.
-        let (out, expected) = unsafe {
-            (
-                out.map(|b| b.assume_init()),
-                expected.map(|b| b.assume_init()),
-            )
-        };
+            // SAFETY: every slot was initialised before the calls.
+            let (out, expected) = unsafe {
+                (
+                    out.map(|b| b.assume_init()),
+                    expected.map(|b| b.assume_init()),
+                )
+            };
 
-        assert_eq!(out[..split], expected[..split], "{byte} at {at}, {split}");
-        assert_eq!(out[split..split + 2], *b"\r\n", "{byte} at {at}, {split}");
-        assert_eq!(
-            out[split + 2..],
-            expected[split..chars],
-            "{byte} at {at}, {split}"
-        );
+            let case = alloc::format!("{url} {byte} at {at}, {split}");
+            assert_eq!(out[..split], expected[..split], "{case}");
+            assert_eq!(out[split..split + 2], *b"\r\n", "{case}");
+            assert_eq!(out[split + 2..], expected[split..chars], "{case}");
+        }
     }
 }
 
@@ -615,28 +668,36 @@ mod tests {
 
     #[test]
     fn decode_quanta_stops_at_every_byte_outside_the_alphabet() {
-        for byte in 0..=255 {
-            let mut chars = *b"QUJDQUJD";
-            chars[6] = byte;
-            let mut out = [MaybeUninit::new(0); 6];
-            let expected = if ALPHABET.contains(&byte) { 8 } else { 4 };
-            assert_eq!(decode_quanta(&chars, &mut out), expected, "{byte}");
+        for (url, alphabet) in [false, true].into_iter().zip(ALPHABETS) {
+            for byte in 0..=255 {
+                let mut chars = *b"QUJDQUJD";
+                chars[6] = byte;
+                let mut out = [MaybeUninit::new(0); 6];
+                let expected = if alphabet.contains(&byte) { 8 } else { 4 };
+                assert_eq!(
+                    decode_quanta(&chars, &mut out, url),
+                    expected,
+                    "{url} {byte}"
+                );
+            }
         }
     }
 
     #[test]
     fn kernels_match_the_quantum_and_group_loops() {
-        check_decode_kernel(|chars, split, out| run(decode_block::<18, 12>(chars, split, out)));
-        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 12]| {
+        check_decode_kernel(|chars, split, out, url| {
+            run(decode_block::<18, 12>(chars, split, out, url))
+        });
+        check_decode_kernel(|chars, split, out: &mut [MaybeUninit<u8>; 12], url| {
             let mut wide = [MaybeUninit::new(0); 16];
-            let read = run(decode_block::<18, 16>(chars, split, &mut wide));
+            let read = run(decode_block::<18, 16>(chars, split, &mut wide, url));
             out.copy_from_slice(&wide[..12]);
             read
         });
         check_encode_kernel(
             0,
-            |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18]| {
-                encode_block(bytes, split, [out])
+            |bytes: &[u8; 12], split, out: &mut [MaybeUninit<u8>; 18], url| {
+                encode_block(bytes, split, [out], url)
             },
         );
     }

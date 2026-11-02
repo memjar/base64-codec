@@ -19,6 +19,7 @@ Base64 encoder and decoder with SIMD and no_std
 
 - **SIMD**: AVX-512, AVX2 and SSSE3 on x86, NEON on aarch64, scalar anywhere else.
 - **Fast**: up to 4x faster than encodify and 34x faster than the base64 crate, see the [benchmarks](#benchmarks).
+- **Two alphabets**: the standard one for mail, the URL-safe one for OAuth and JWT tokens, padded or not.
 - **MIME lines**: encodes in lines of 76 characters ended by CRLF or LF, or in one unbroken run.
 - **Lenient decoding**: never fails, skips line breaks and blanks, reports other stray bytes.
 - **I/O-free**: encode and decode chunk by chunk into your own buffers.
@@ -31,7 +32,7 @@ Base64 encoder and decoder with SIMD and no_std
 
 | RFC    | What is covered                                                                                                      |
 |--------|----------------------------------------------------------------------------------------------------------------------|
-| [4648] | The base64 encoding: the standard alphabet and its padding                                                           |
+| [4648] | The base64 encoding: the standard and URL alphabets, padded or not                                                   |
 | [2045] | Base64 as a MIME transfer encoding: lines of 76 characters, line breaks and foreign characters skipped when decoding |
 | [2047] | The B encoding of encoded words: one unbroken run of characters                                                      |
 
