@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 base64-codec = { path = ".." }
-simd-cpu = { git = "https://github.com/pimalaya/simd-cpu", rev = "f77308a7279f2ad9feabd2581e58487e040d86a7", features = ["std"] }
+simd-cpu = { git = "https://github.com/pimalaya/simd-cpu", rev = "f2eb72cff2fafad8ae135e00685bc19f9e80e5cc", features = ["std"] }
 libfuzzer-sys = "0.4"
 
 [[bin]]

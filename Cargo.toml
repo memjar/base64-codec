@@ -26,11 +26,11 @@ path = "benches/compare.rs"
 harness = false
 
 [dependencies]
-simd-cpu = { version = "0.0.1", git = "https://github.com/pimalaya/simd-cpu", rev = "f77308a7279f2ad9feabd2581e58487e040d86a7" }
+simd-cpu = { version = "0.0.1", git = "https://github.com/pimalaya/simd-cpu", rev = "f2eb72cff2fafad8ae135e00685bc19f9e80e5cc" }
 
 [dev-dependencies]
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 base64-simd = "0.8"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 encodify = "1"
-simd-cpu = { version = "0.0.1", git = "https://github.com/pimalaya/simd-cpu", rev = "f77308a7279f2ad9feabd2581e58487e040d86a7", features = ["std"] }
+simd-cpu = { version = "0.0.1", git = "https://github.com/pimalaya/simd-cpu", rev = "f2eb72cff2fafad8ae135e00685bc19f9e80e5cc", features = ["std"] }
