@@ -9,7 +9,12 @@ use simd_cpu::SimdCpu;
 use crate::cpu::Base64Cpu;
 
 /// The backend, alphabet, padding and line ending every call runs with, a
-/// stateless value the application builds once.
+/// stateless value built once.
+///
+/// [`Base64Codec::default()`] runs the backend of the token the application
+/// installed, read when the value is built; an explicit token goes in
+/// [`cpu`](Self::cpu): `Base64Codec { cpu: Base64Cpu::new(token),
+/// ..Base64Codec::default() }`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Base64Codec {
     /// The backend every call runs.
@@ -29,8 +34,8 @@ pub struct Base64Codec {
 }
 
 impl Base64Codec {
-    /// The build target's backend, the standard alphabet, padded and
-    /// unwrapped, needing no detection.
+    /// The build target's backend, whatever the application installed, the
+    /// standard alphabet, padded and unwrapped.
     pub const BASELINE: Self = Self {
         cpu: Base64Cpu::new(SimdCpu::BASELINE),
         alphabet: Base64Alphabet::Standard,
@@ -52,8 +57,14 @@ impl Base64Codec {
 }
 
 impl Default for Base64Codec {
+    /// [`BASELINE`](Self::BASELINE) on the backend of the token the
+    /// application installed.
+    #[inline]
     fn default() -> Self {
-        Self::BASELINE
+        Self {
+            cpu: Base64Cpu::default(),
+            ..Self::BASELINE
+        }
     }
 }
 

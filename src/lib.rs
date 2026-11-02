@@ -3,11 +3,16 @@
 //! Base64 with the standard or the URL alphabet (RFC 4648 4 and 5), decoded
 //! leniently as mail needs it, with SIMD, `no_std` and no I/O.
 //!
-//! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, picked from the
-//! `simd_cpu::SimdCpu` the application gets once, usually from
-//! `SimdCpu::detect`, its alphabet, whether encoding pads, and the line ending
-//! of encoded output. Its methods take a whole input, [`Base64Encode`] and
-//! [`Base64Decode`] chunk by chunk.
+//! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, its alphabet,
+//! whether encoding pads, and the line ending of encoded output. Its methods
+//! take a whole input, [`Base64Encode`] and [`Base64Decode`] chunk by chunk.
+//!
+//! The backend comes from a `simd_cpu::SimdCpu`. The application installs
+//! one once, first thing in `main`, with `SimdCpu::install_detected`, and
+//! every `Base64Codec::default()` built afterwards runs it, the build
+//! target's baseline when none is installed; a caller holding a token of its
+//! own builds the backend with `Base64Cpu::new`. The library never detects or
+//! installs.
 //!
 //! The scalar steps alone handle what is not whole quanta: padding, stray
 //! bytes, partial quanta, the carry between calls. Every backend has block
@@ -15,16 +20,11 @@
 //! writing the same bytes; ATTRIBUTION.md credits the methods.
 //!
 //! ```
-//! use base64_codec::{
-//!     codec::{Base64Codec, Base64Eol},
-//!     cpu::Base64Cpu,
-//! };
-//! use simd_cpu::SimdCpu;
+//! use base64_codec::codec::{Base64Codec, Base64Eol};
 //!
 //! let codec = Base64Codec {
-//!     cpu: Base64Cpu::new(SimdCpu::BASELINE),
 //!     wrap: Some(Base64Eol::Crlf),
-//!     ..Base64Codec::BASELINE
+//!     ..Base64Codec::default()
 //! };
 //!
 //! let mut encoded = [0; 6];

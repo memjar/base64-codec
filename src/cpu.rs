@@ -1,8 +1,9 @@
 //! # CPU token
 //!
 //! [`Base64Cpu`], the backend a [`Base64Codec`](crate::codec::Base64Codec)
-//! runs, picked from the [`SimdCpu`] the application hands over: the library
-//! never detects CPU features.
+//! runs, picked from a [`SimdCpu`]: one the caller hands over, or by default
+//! the one the application installed. The library never detects CPU
+//! features.
 
 use simd_cpu::SimdCpu;
 
@@ -47,8 +48,11 @@ impl Base64Cpu {
 }
 
 impl Default for Base64Cpu {
+    /// The backend of [`SimdCpu::current`]: the token the application
+    /// installed, or [`SimdCpu::BASELINE`] when it installed none.
+    #[inline]
     fn default() -> Self {
-        const { Self::new(SimdCpu::BASELINE) }
+        Self::new(SimdCpu::current())
     }
 }
 

@@ -23,7 +23,7 @@ Base64 encoder and decoder with SIMD and no_std
 - **MIME lines**: encodes in lines of 76 characters ended by CRLF or LF, or in one unbroken run.
 - **Lenient decoding**: never fails, skips line breaks and blanks, reports other stray bytes.
 - **I/O-free**: encode and decode chunk by chunk into your own buffers.
-- **Portable**: no_std, the CPU features detected once by the application through [simd-cpu](https://github.com/pimalaya/simd-cpu), the only dependency.
+- **Portable**: no_std, the CPU features detected and installed once by the application through [simd-cpu](https://github.com/pimalaya/simd-cpu), the only dependency, and taken by every default codec; the build target's baseline when nothing is installed.
 
 > [!TIP]
 > base64-codec uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate optional support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/base64-codec/latest/features).

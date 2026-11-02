@@ -100,4 +100,4 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "simd-cpu"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/simd-cpu?rev=4cde2e904ec6edd841215dd5111213325899e11a#4cde2e904ec6edd841215dd5111213325899e11a"
+source = "git+https://github.com/pimalaya/simd-cpu?rev=f77308a7279f2ad9feabd2581e58487e040d86a7#f77308a7279f2ad9feabd2581e58487e040d86a7"
