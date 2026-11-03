@@ -14,13 +14,13 @@ rustPlatform.buildRustPackage {
   inherit buildNoDefaultFeatures buildFeatures;
 
   pname = "base64-codec";
-  version = "0.0.1";
+  version = "0.1.0";
   cargoHash = "";
 
   src = fetchFromGitHub {
     owner = "pimalaya";
     repo = "base64-codec";
-    rev = "v0.0.1";
+    rev = "v0.1.0";
     hash = "";
   };
 

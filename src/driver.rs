@@ -2,9 +2,10 @@
 //!
 //! The loops of every backend, written once as `base64_driver!` and stamped
 //! into each backend under its target features so that its kernels inline,
-//! called through [`Loops`]. Runs end with a block overlapping the one
-//! before; lines of 76 characters go a period at a time, the lines whose
-//! characters make 19 blocks.
+//! called through [`Loops`].
+//!
+//! Runs end with a block overlapping the one before; lines of 76 characters
+//! go a period at a time, the lines whose characters make 19 blocks.
 
 use core::mem::MaybeUninit;
 
@@ -473,7 +474,7 @@ mod tests {
         decode::Base64Decode,
         driver::uninit,
         encode::Base64Encode,
-        scalar::{self, DecodeState, EncodeState},
+        scalar::{self, DecodeState, EncodeState, LINE_BYTES},
     };
 
     const WRAPS: [Option<Base64Eol>; 3] = [None, Some(Base64Eol::Crlf), Some(Base64Eol::Lf)];
@@ -628,9 +629,9 @@ mod tests {
     fn every_backend_matches_the_reference_around_whole_cycles() {
         let mut rng = Rng(11);
 
-        // Around one and two cycles of 32 lines ending with CRLF and of 64
-        // ending with LF, whose output fills whole vectors.
-        for len in [1824, 3648, 7296]
+        // NOTE: 32 CRLF or 64 LF lines make a cycle filling whole vectors.
+        for len in [32, 64, 128]
+            .map(|lines| lines * LINE_BYTES)
             .into_iter()
             .flat_map(|end| end - 64..end + 64)
         {

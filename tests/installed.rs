@@ -1,3 +1,5 @@
+//! # Installed token
+//!
 //! A default codec and the token the application installs, alone in its
 //! binary since the token is the process's.
 

@@ -1,3 +1,5 @@
+//! # Comparative benchmark
+//!
 //! base64-codec against the base64 crate, base64-simd and encodify, from 64
 //! bytes to 10 MiB, unwrapped and in CRLF lines, as benches/README.md tells.
 

@@ -8,34 +8,35 @@ use simd_cpu::SimdCpu;
 
 use crate::cpu::Base64Cpu;
 
-/// The backend, alphabet, padding and line ending every call runs with, a
-/// stateless value built once.
+/// The stateless backend, alphabet, padding and line ending of every call.
 ///
-/// [`Base64Codec::default()`] runs the backend of the token the application
-/// installed, read when the value is built; an explicit token goes in
-/// [`cpu`](Self::cpu): `Base64Codec { cpu: Base64Cpu::new(token),
-/// ..Base64Codec::default() }`.
+/// [`Base64Codec::default()`] runs the token the application installed, read
+/// when the value is built; an explicit token goes in [`cpu`](Self::cpu):
+/// `Base64Codec { cpu: Base64Cpu::new(token), ..Base64Codec::default() }`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Base64Codec {
     /// The backend every call runs.
     pub cpu: Base64Cpu,
     /// The alphabet encoding writes and decoding takes.
     pub alphabet: Base64Alphabet,
-    /// Whether encoding ends a partial quantum with `=`; decoding accepts
-    /// input with or without padding alike.
+    /// Whether encoding ends a partial quantum with `=`.
+    ///
+    /// Decoding accepts input with or without padding alike.
     ///
     /// Refs: <https://datatracker.ietf.org/doc/html/rfc4648#section-3.2>
     pub pad: bool,
-    /// The ending of 76-character encoded lines, or none for one unbroken
-    /// run; decoding ignores it.
+    /// The ending of 76-character encoded lines, or none for one unbroken run.
+    ///
+    /// Decoding ignores it.
     ///
     /// Refs: <https://datatracker.ietf.org/doc/html/rfc2045#section-6.8>
     pub wrap: Option<Base64Eol>,
 }
 
 impl Base64Codec {
-    /// The build target's backend, whatever the application installed, the
-    /// standard alphabet, padded and unwrapped.
+    /// The build target's backend, the standard alphabet, padded, unwrapped.
+    ///
+    /// It ignores whatever token the application installed.
     pub const BASELINE: Self = Self {
         cpu: Base64Cpu::new(SimdCpu::BASELINE),
         alphabet: Base64Alphabet::Standard,
@@ -68,8 +69,9 @@ impl Default for Base64Codec {
     }
 }
 
-/// The characters of the sextets 62 and 63, the others being `A` to `Z`,
-/// `a` to `z` and `0` to `9`.
+/// The characters of the sextets 62 and 63.
+///
+/// The others are `A` to `Z`, `a` to `z` and `0` to `9` in both alphabets.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Base64Alphabet {
     /// `+` and `/`, as mail needs.

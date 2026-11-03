@@ -1,23 +1,38 @@
+#![no_std]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
+
 //! # base64-codec
 //!
 //! Base64 with the standard or the URL alphabet (RFC 4648 4 and 5), decoded
 //! leniently as mail needs it, with SIMD, `no_std` and no I/O.
 //!
+//! ## Calls
+//!
 //! A [`Base64Codec`] holds a [`Base64Cpu`] backend token, its alphabet,
 //! whether encoding pads, and the line ending of encoded output. Its methods
 //! take a whole input, [`Base64Encode`] and [`Base64Decode`] chunk by chunk.
 //!
-//! The backend comes from a `simd_cpu::SimdCpu`. The application installs
-//! one once, first thing in `main`, with `SimdCpu::install_detected`, and
-//! every `Base64Codec::default()` built afterwards runs it, the build
-//! target's baseline when none is installed; a caller holding a token of its
-//! own builds the backend with `Base64Cpu::new`. The library never detects or
-//! installs.
+//! ## CPU token
+//!
+//! The backend comes from a `simd_cpu::SimdCpu` the application installs
+//! once, first thing in `main`, with `SimdCpu::install_detected`: every
+//! `Base64Codec::default()` built afterwards runs it, the build target's
+//! baseline when none is installed.
+//!
+//! A caller holding a token of its own builds the backend with
+//! `Base64Cpu::new`. The library never detects or installs.
+//!
+//! ## Backends
 //!
 //! The scalar steps alone handle what is not whole quanta: padding, stray
 //! bytes, partial quanta, the carry between calls. Every backend has block
 //! kernels that one driver, stamped into it, runs over runs and lines, all
 //! writing the same bytes; ATTRIBUTION.md credits the methods.
+//!
+//! cairn/spec/ specifies the calls, encoding, decoding and backends.
+//!
+//! ## Example
 //!
 //! ```
 //! use base64_codec::codec::{Base64Codec, Base64Eol};
@@ -41,10 +56,6 @@
 //! [`Base64Encode`]: encode::Base64Encode
 //! [`Base64Decode`]: decode::Base64Decode
 //! [`Base64Cpu`]: cpu::Base64Cpu
-
-#![no_std]
-#![cfg_attr(docsrs, feature(doc_cfg))]
-#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;

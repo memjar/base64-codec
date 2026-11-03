@@ -247,7 +247,6 @@ fn encode_cycles<const URL: bool, const N: usize, const SPAN: usize>(
 ) -> usize {
     let span = SPAN / 16;
     let wraps: &[Wrap] = if span == 78 { &CRLF } else { &LF };
-    // The one vector of a cycle drawing from the blocks of the one before.
     let stay = const { stay(SPAN / 16) };
     let (outs, _) = dst[..lines * span / 64 * 64].as_chunks_mut::<64>();
     let last = src.len().saturating_sub(48);
@@ -257,7 +256,6 @@ fn encode_cycles<const URL: bool, const N: usize, const SPAN: usize>(
         return encode_periods::<URL, N, SPAN>(src, dst, lines);
     };
 
-    // The encoded blocks the vector draws from, and where the second starts.
     let (mut low, mut high, mut from) = (
         _mm512_setzero_si512(),
         encode_vector(vector(first), 0, URL),
@@ -273,7 +271,7 @@ fn encode_cycles<const URL: bool, const N: usize, const SPAN: usize>(
                     break 'cycles;
                 }
 
-                // SAFETY: the load reads the 64 bytes of `src` ending the block.
+                // SAFETY: reads the 64 bytes of `src` ending the block.
                 let bytes = unsafe { _mm512_loadu_si512(src.as_ptr().add(from - 16).cast()) };
                 (low, high) = (high, encode_vector(bytes, 16, URL));
             }
@@ -344,13 +342,12 @@ const fn wraps<const W: usize, const V: usize>() -> [Wrap; V] {
     let mut at = 0;
 
     while at < 64 * V {
-        // The first character of the two blocks the vector draws from.
-        let first = chars(at / 64 * 64, W) / 64 * 64;
+        let drawn_from = chars(at / 64 * 64, W) / 64 * 64;
 
         table[at / 64].0[at % 64] = match at % W {
             col if col < LINE => {
-                assert!(chars(at, W) - first < 128);
-                (chars(at, W) - first) as u8 | 0x80
+                assert!(chars(at, W) - drawn_from < 128);
+                (chars(at, W) - drawn_from) as u8 | 0x80
             }
             col if col == LINE && W == LINE + 2 => b'\r',
             _ => b'\n',

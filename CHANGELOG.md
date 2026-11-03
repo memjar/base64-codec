@@ -6,22 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-03
+
 ### Added
 
-- Added `codec::Base64Codec`, the `Copy` value every call runs from: the backend (`cpu`), the alphabet (`alphabet`), whether encoding pads (`pad`) and the line ending of encoded output (`wrap`, unwrapped or lines of 76 characters ended by CRLF or LF), with `BASELINE` needing no detection.
+- Added `codec::Base64Codec`, the `Copy` value every call runs from.
 
-- Added `codec::Base64Alphabet`: the standard alphabet, or the URL one of RFC 4648 5 (`-` and `_`) for OAuth and JWT tokens, on every backend. Decoding takes the codec's alphabet alone, the other one's two symbols being stray bytes.
+  It holds the backend (`cpu`), the alphabet (`alphabet`), whether encoding pads (`pad`) and the line ending of encoded output (`wrap`). `BASELINE` needs no CPU detection.
 
-- Added unpadded encoding, without `pad`; decoding accepts input with or without padding alike.
-
-- Added the one-shot `Base64Codec::encode` and `Base64Codec::decode`, and `encode_vec` and `decode_vec` behind the `alloc` feature.
-
+- Added `codec::Base64Alphabet`: the standard alphabet and the URL one of RFC 4648 section 5.
+- Added `codec::Base64Eol`, ending encoded lines of 76 characters with CRLF or LF.
+- Added `Base64Codec::encode` and `Base64Codec::decode`, the one-shot calls.
+- Added `Base64Codec::encode_vec` and `Base64Codec::decode_vec`, behind the `alloc` feature.
 - Added `Base64Codec::encoded_len` and `Base64Codec::decoded_len_max`, the output lengths to allocate.
+- Added `encode::Base64Encode`, the I/O-free encoder over the caller's buffers, the input cut anywhere.
+- Added `decode::Base64Decode`, the I/O-free decoder over the caller's buffers, the input cut anywhere.
 
-- Added `encode::Base64Encode` and `decode::Base64Decode`, the I/O-free encoder and decoder built from a codec and resumed over the caller's buffers, the input cut anywhere.
+  Decoding never fails: line breaks, blanks and missing padding are accepted, other stray bytes skipped and reported through `clean`.
 
-- Added lenient decoding with the rules of mime-rs's base64 wrapper: line breaks and blanks skipped, other stray bytes skipped and reported, missing padding accepted, never failing.
+- Added `cpu::Base64Cpu`, the widest backend a `simd_cpu::SimdCpu` token has the features of.
 
-- Added `cpu::Base64Cpu`, the backend token a codec holds, the widest backend a `simd_cpu::SimdCpu` has the features of. `Base64Cpu::default()` and `Base64Codec::default()` take the token the application installed with `SimdCpu::install_detected`, the baseline when none is.
+  `Base64Cpu::default()` and `Base64Codec::default()` run the token the application installed with `SimdCpu::install_detected`, the build target's baseline when none is.
 
 - Added the scalar, SSSE3, AVX2, AVX-512 VBMI and NEON backends, all writing the same bytes.
+
+[Unreleased]: https://github.com/pimalaya/base64-codec/compare/v0.1.0..HEAD
+[0.1.0]: https://github.com/pimalaya/base64-codec/compare/root..v0.1.0

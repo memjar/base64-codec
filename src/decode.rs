@@ -1,10 +1,12 @@
 //! # Decoding
 //!
-//! Lenient decoding that never fails, as mail needs it: blanks, line breaks,
-//! missing padding and trailing bits are clean; a stray byte (skipped), data
-//! after padding (decoded) and a lone last symbol (dropped) are not. Chunk
-//! by chunk with [`Base64Decode`], at once with [`Base64Codec::decode`].
-//! Encoding is the sibling [`encode`](crate::encode).
+//! Lenient decoding that never fails, as mail needs it, chunk by chunk with
+//! [`Base64Decode`] or at once with [`Base64Codec::decode`]. Encoding is the
+//! sibling [`encode`](crate::encode).
+//!
+//! Blanks, line breaks, missing padding and trailing bits are clean; a stray
+//! byte (skipped), data after padding (decoded) and a lone last symbol
+//! (dropped) are not.
 
 use core::mem::MaybeUninit;
 
@@ -52,8 +54,10 @@ impl Base64Decode {
         }
     }
 
-    /// Decodes as much of `src` as fits in `dst`, always progressing with
-    /// three bytes of room; bytes of `dst` past the written ones may change.
+    /// Decodes as much of `src` as fits in `dst`.
+    ///
+    /// It always progresses with three bytes of room. Bytes of `dst` past the
+    /// written ones may change.
     pub fn resume(&mut self, src: &[u8], dst: &mut [u8]) -> Base64DecodeOutput {
         let (read, written) = self.run(src, driver::uninit(dst));
 
@@ -64,8 +68,9 @@ impl Base64Decode {
         }
     }
 
-    /// Ends the input with the last partial quantum, at most two bytes, or
-    /// returns none, writing nothing, when `dst` is too short.
+    /// Ends the input with the last partial quantum, at most two bytes.
+    ///
+    /// Returns none, writing nothing, when `dst` is too short.
     pub fn finish(&mut self, dst: &mut [u8]) -> Option<Base64DecodeOutput> {
         let written = scalar::decode_finish(&mut self.state, driver::uninit(dst))?;
 
@@ -126,9 +131,10 @@ pub struct Base64DecodeOutput {
 
 /// One-shot decoding.
 impl Base64Codec {
-    /// Decodes all of `src` into the first
-    /// [`decoded_len_max`](Self::decoded_len_max) bytes of `dst`, any of which
-    /// may change, or returns none, writing nothing, when `dst` is shorter.
+    /// Decodes all of `src` into `dst`.
+    ///
+    /// Any of the first [`decoded_len_max`](Self::decoded_len_max) bytes of
+    /// `dst` may change. Returns none, writing nothing, when `dst` is shorter.
     #[inline]
     pub fn decode(self, src: &[u8], dst: &mut [u8]) -> Option<Base64DecodeOutput> {
         let dst = dst.get_mut(..self.decoded_len_max(src.len()))?;

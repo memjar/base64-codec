@@ -16,8 +16,10 @@ pub struct Base64Cpu {
 }
 
 impl Base64Cpu {
-    /// The widest backend `cpu` has the features of: on x86 AVX-512 VBMI,
-    /// then AVX2, then SSSE3; NEON on aarch64; scalar otherwise.
+    /// The widest backend `cpu` has the features of.
+    ///
+    /// On x86 AVX-512 VBMI, then AVX2, then SSSE3; NEON on aarch64; scalar
+    /// otherwise.
     pub const fn new(cpu: SimdCpu) -> Self {
         Self {
             backend: widest(cpu),

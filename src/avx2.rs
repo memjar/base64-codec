@@ -95,9 +95,7 @@ fn decode<const C: usize, const N: usize>(
     };
     let high = _mm256_and_si256(_mm256_srli_epi32::<4>(chars), _mm256_set1_epi8(0x0f));
 
-    // The classes of the low nibbles B to F, of the high nibble 7, and the
-    // offset of the high nibble 2: the URL alphabet moves 62 and 63.
-    let ([b, c, d, e, f], seven, two) = if url {
+    let ([low_b, low_c, low_d, low_e, low_f], high_7, offset_2) = if url {
         ([0x3b, 0x3b, 0x3a, 0x3b, 0x33], 0x20, 17)
     } else {
         ([0x1a, 0x1b, 0x1b, 0x1b, 0x1a], 0x08, 19)
@@ -106,7 +104,8 @@ fn decode<const C: usize, const N: usize>(
     let allowed = _mm256_shuffle_epi8(
         _mm256_broadcastsi128_si256(_mm_andnot_si128(
             _mm_setr_epi8(
-                0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, b, c, d, e, f,
+                0x15, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x13, low_b, low_c,
+                low_d, low_e, low_f,
             ),
             _mm_set1_epi8(-1),
         )),
@@ -115,7 +114,7 @@ fn decode<const C: usize, const N: usize>(
 
     let class = _mm256_shuffle_epi8(
         _mm256_broadcastsi128_si256(_mm_setr_epi8(
-            0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, seven, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+            0x10, 0x10, 0x01, 0x02, 0x04, 0x08, 0x04, high_7, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
             0x10, 0x10,
         )),
         high,
@@ -123,7 +122,7 @@ fn decode<const C: usize, const N: usize>(
 
     let offsets = _mm256_shuffle_epi8(
         _mm256_broadcastsi128_si256(_mm_setr_epi8(
-            0, 0, two, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, offset_2, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0,
         )),
         high,
     );
@@ -131,7 +130,7 @@ fn decode<const C: usize, const N: usize>(
     let mut sextets = _mm256_add_epi8(chars, offsets);
 
     if url {
-        // `_` shares its high nibble with `P` to `Z`: saturated to 63 below.
+        // NOTE: `_` shares its high nibble with `P` to `Z`: saturated to 63.
         let underscore = _mm256_cmpeq_epi8(chars, _mm256_set1_epi8(b'_' as i8));
         sextets = _mm256_or_si256(sextets, underscore);
     }

@@ -1,3 +1,5 @@
+//! # Decode fuzz target
+//!
 //! Every backend decodes any input in either alphabet, one-shot or resumed
 //! over any chunks and room, to the bytes and flag of scalar, without
 //! panicking.

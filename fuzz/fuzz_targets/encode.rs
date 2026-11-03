@@ -1,3 +1,5 @@
+//! # Encode fuzz target
+//!
 //! Every backend encodes any input in either alphabet, padded or not,
 //! one-shot or resumed over any chunks and room, to the characters of
 //! scalar, which decode back clean.

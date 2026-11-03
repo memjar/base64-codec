@@ -1,3 +1,5 @@
+//! # mime-rs parity
+//!
 //! Every backend against the base64 wrapper of mime-rs it replaces.
 
 use base64_codec::{

@@ -1,7 +1,7 @@
 [package]
 name = "base64-codec"
 description = "Base64 encoder and decoder with SIMD and no_std"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Clément DOUIN (soywod) <pimalaya.org@posteo.net>"]
 rust-version = "1.89"
 edition = "2024"
@@ -25,12 +25,12 @@ name = "compare"
 path = "benches/compare.rs"
 harness = false
 
-[dependencies]
-simd-cpu = { version = "0.0.1", git = "https://github.com/pimalaya/simd-cpu", rev = "f2eb72cff2fafad8ae135e00685bc19f9e80e5cc" }
-
 [dev-dependencies]
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
-base64-simd = "0.8"
+base64-simd = { version = "0.8", default-features = false, features = ["std", "detect"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-encodify = "1"
-simd-cpu = { version = "0.0.1", git = "https://github.com/pimalaya/simd-cpu", rev = "f2eb72cff2fafad8ae135e00685bc19f9e80e5cc", features = ["std"] }
+encodify = { version = "1", default-features = false }
+simd-cpu = { version = "0.1", default-features = false, features = ["std"] }
+
+[dependencies]
+simd-cpu = { version = "0.1", default-features = false }
